@@ -1,0 +1,41 @@
+# Local verification evidence and original-file backups
+/Temp/
+/.test-tmp/
+/.task-backups/
+/.stage-snapshot.json
+*.log
+*.before
+*.bak
+
+# Generated artwork; the legacy launcher's shipped SVG stays tracked
+/output/pelican-latest.svg
+/output/pelican-latest.png
+
+# Runtime data, credentials and build artifacts
+node_modules/
+coverage/
+dist/
+build/
+.cache/
+.env
+.env.*
+auth.json
+benchmark.json
+/codex-companion/
+*.jsonl
+*.jsonl.zst
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.exe
+*.dll
+*.pdb
+
+# Editor and operating-system metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini

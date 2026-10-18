@@ -1,0 +1,13 @@
+{
+  "name": "codex-companion-status",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node src/server.js",
+    "desktop": "powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File scripts/start-floating-widget.ps1",
+    "test": "node --test",
+    "build": "node --check src/server.js && node --check src/public/app.js && node --check src/telemetry/config-defaults.js && node --check src/telemetry/session-reader.js && node --check src/telemetry/usage-summary.js && node --check src/telemetry/live-telemetry.js && node --check src/telemetry/desktop-live.js && node --check src/telemetry/usage.js && node --check src/telemetry/speed.js && node --check src/telemetry/speed-worker.js && node --check src/benchmark/cases.js && node --check src/benchmark/runner.js && node --check src/benchmark/service.js && node --check src/benchmark/store.js && node --check src/benchmark/scoring.js && node --check src/public/preview.js && node --check src/public/preview-frame.js",
+    "test:html-preview": "powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File scripts/html-preview-smoke.ps1"
+  }
+}
