@@ -72,7 +72,7 @@ function applyPatch(state, patch) {
 export function createDesktopLiveConnector({
   pipePath = PIPE, connect = (path) => net.createConnection(path), wallClock = () => Date.now(),
   now = () => performance.now(), maxFrameBytes = 32 * 1024 * 1024, maxCandidates = 8,
-  leaseMs = 8_000, refreshMs = 30_000, reconnectMs = 1_000, discoverySettleMs = 500,
+  leaseMs = 8_000, refreshMs = 120_000, reconnectMs = 1_000, discoverySettleMs = 500,
 } = {}) {
   return ({ status, observe }) => {
     let socket = null, clientId = null, stopped = false, started = false, timer = null;

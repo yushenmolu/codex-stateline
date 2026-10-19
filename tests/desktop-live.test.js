@@ -514,3 +514,24 @@ test('expired HTTP leases and unanswered handshakes release sources using inject
   assert.equal(pending.statuses.at(-1).reason, 'source_unavailable');
   assert.equal(pending.conversations.length, 0);
 });
+
+test('desktop observed speed survives confirmed updates slower than the old thirty-second reconnect', (t) => {
+  const s = setup(t, { refreshMs: undefined }, { telemetry: true });
+  s.ready(THREAD); s.owner(); s.snapshot();
+  assert.equal(s.live.snapshot({ taskId: THREAD }).speed, null);
+  s.advance(35_000);
+  s.live.snapshot({ taskId: THREAD }); s.flush();
+  assert.equal(s.peer.destroyed, false);
+  s.state({ type: 'patches', baseRevision: 1, revision: 2, patches: [
+    { op: 'replace', path: ['latestTokenUsageInfo', 'total'], value: { inputTokens: 200, outputTokens: 90, totalTokens: 290 } },
+  ] });
+  const speed = s.live.snapshot({ taskId: THREAD }).speed;
+  assert.equal(speed.source, 'observed_window');
+  assert.equal(speed.outputTokens, 70);
+  assert.equal(speed.elapsedSeconds, 35);
+  assert.equal(speed.outputTokensPerSecond, 2);
+  s.advance(85_001);
+  s.live.snapshot({ taskId: THREAD }); s.flush();
+  assert.equal(s.peer.destroyed, true, 'bounded refresh still re-verifies source identity');
+  assert.equal(s.live.snapshot({ taskId: THREAD }).speed, null);
+});

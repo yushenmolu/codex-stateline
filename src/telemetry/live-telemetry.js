@@ -1,4 +1,5 @@
 import { validEffort, validModel } from './usage.js';
+import { createObservedSpeedTracker } from './speed.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const STATES = new Set(['available', 'waiting', 'unavailable', 'disconnected', 'ambiguous']);
@@ -52,8 +53,23 @@ export function publicLiveSnapshot(value, { taskId = null, now = Date.now() } = 
   }
   const speed = value.speed;
   if (object(speed) && speed.source === 'confirmed_request' && Number.isFinite(speed.outputTokensPerSecond)
-    && speed.outputTokensPerSecond >= 0 && time(speed.observedAt)) {
+    && speed.outputTokensPerSecond >= 0 && time(speed.observedAt) && Date.parse(speed.observedAt) <= Date.parse(observedAt)
+    && Date.parse(speed.observedAt) <= now) {
     result.speed = { source: 'confirmed_request', outputTokensPerSecond: speed.outputTokensPerSecond, observedAt: speed.observedAt };
+  }
+  if (object(speed) && speed.source === 'observed_window' && result.usage?.scope === 'conversation'
+    && safeInt(speed.outputTokens) && speed.outputTokens <= result.usage.outputTokens
+    && Number.isFinite(speed.elapsedSeconds) && speed.elapsedSeconds >= 1 && speed.elapsedSeconds <= 120
+    && Number.isFinite(speed.outputTokensPerSecond) && speed.outputTokensPerSecond >= 0
+    && speed.includesToolsAndWait === true && time(speed.startedAt) && time(speed.observedAt)) {
+    const started = Date.parse(speed.startedAt), observed = Date.parse(speed.observedAt), expected = speed.outputTokens / speed.elapsedSeconds;
+    if (Math.abs(observed - started - speed.elapsedSeconds * 1000) <= 1 && observed <= Date.parse(observedAt)
+      && observed <= Date.parse(result.sampledAt) && observed <= now && now - observed <= 60_000
+      && Math.abs(speed.outputTokensPerSecond - expected) <= 1e-9 * Math.max(1, expected)) {
+      result.speed = { source: 'observed_window', outputTokensPerSecond: speed.outputTokensPerSecond,
+        outputTokens: speed.outputTokens, elapsedSeconds: speed.elapsedSeconds,
+        startedAt: speed.startedAt, observedAt: speed.observedAt, includesToolsAndWait: true };
+    }
   }
   if (result.usage === null) {
     result.state = 'waiting';
@@ -88,7 +104,7 @@ export function createLiveTelemetry({ connector = null, wallClock = () => Date.n
     if (!thread) {
       if (!['thread', 'conversation'].includes(event.type) || ![true, false, null].includes(event.primary)) return;
       if (threads.size >= maxThreads) { reason = 'capacity_exceeded'; return; }
-      thread = { id: event.threadId, primary: event.primary, observedAt, state: 'idle', usage: null, lifecycle: null, model: null, reasoningEffort: null, speed: null, turnId: null, lastUsageAt: null };
+      thread = { id: event.threadId, primary: event.primary, observedAt, state: 'idle', usage: null, lifecycle: null, model: null, reasoningEffort: null, speedTracker: createObservedSpeedTracker({ monotonicClock }), turnId: null, lastUsageAt: null };
       threads.set(event.threadId, thread);
     }
     if (Date.parse(observedAt) < Date.parse(thread.observedAt)) return;
@@ -102,27 +118,32 @@ export function createLiveTelemetry({ connector = null, wallClock = () => Date.n
       thread.lifecycle = event.state === 'active'
         ? { state: 'running', startedAt: null, completedAt: null, elapsedSeconds: null }
         : null;
-      thread.model = null; thread.reasoningEffort = null; thread.speed = null;
+      thread.model = null; thread.reasoningEffort = null;
+      if (event.state === 'active') thread.speedTracker.observe(thread.id, total, observedAt);
+      else thread.speedTracker.reset();
     } else if (event.type === 'thread') {
       thread.primary = event.primary;
       if (['active', 'idle', 'failed'].includes(event.state)) thread.state = event.state;
+      if (thread.state !== 'active') thread.speedTracker.reset();
     } else if (event.type === 'turn_started') {
       if (!UUID.test(event.turnId ?? '')) return;
       thread.turnId = event.turnId;
       thread.state = 'active';
       thread.lifecycle = { state: 'running', startedAt: time(event.startedAt), completedAt: null, elapsedSeconds: null };
       // Runtime configuration is not proof of the model executing this turn.
-      thread.model = null; thread.reasoningEffort = null; thread.speed = null;
+      thread.model = null; thread.reasoningEffort = null; thread.speedTracker.reset();
     } else if (event.type === 'turn_completed') {
       if (event.turnId !== thread.turnId || !LIFECYCLES.has(event.state) || event.state === 'running') return;
       thread.state = event.state === 'failed' ? 'failed' : 'idle';
+      thread.speedTracker.reset();
       thread.lifecycle = { state: event.state, startedAt: thread.lifecycle?.startedAt ?? time(event.startedAt), completedAt: time(event.completedAt), elapsedSeconds: Number.isFinite(event.elapsedSeconds) && event.elapsedSeconds >= 0 ? event.elapsedSeconds : null };
     } else if (event.type === 'usage') {
-      const total = usage(event.usage);
-      if (event.turnId !== thread.turnId || !total) return;
+      if (event.turnId !== thread.turnId) return;
       if (thread.lastUsageAt && Date.parse(observedAt) < Date.parse(thread.lastUsageAt)) return;
-      thread.usage = { scope: 'conversation', includesSubagents: false, ...total };
+      const total = usage(event.usage);
+      thread.usage = total ? { scope: 'conversation', includesSubagents: false, ...total } : null;
       thread.lastUsageAt = observedAt;
+      if (thread.state === 'active') thread.speedTracker.observe(thread.id, total, observedAt);
     } else return;
     thread.observedAt = observedAt;
   }
@@ -155,7 +176,7 @@ export function createLiveTelemetry({ connector = null, wallClock = () => Date.n
     return publicLiveSnapshot({
       sampledAt: new Date(now).toISOString(), state: thread.usage ? 'available' : 'waiting', source, reason: thread.usage ? null : 'usage_unconfirmed',
       observedAt: thread.observedAt, session: { id: thread.id }, usage: thread.usage, model: thread.model, reasoningEffort: thread.reasoningEffort,
-      lifecycle: thread.lifecycle, speed: thread.speed,
+      lifecycle: thread.lifecycle, speed: thread.speedTracker.current(),
     }, { taskId, now });
   }
 

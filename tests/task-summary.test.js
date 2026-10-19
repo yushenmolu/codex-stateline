@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTaskSummary } from '../src/telemetry/task-summary.js';
+import { taskUsageEmpty, usageAllowlist } from '../src/telemetry/usage.js';
 
 const iso = '2026-10-11T00:00:00.000Z';
 const now = Date.parse(iso);
@@ -115,6 +116,58 @@ test('task summary lists roots and projects three distinct agent models', async 
   assert.equal(byId[old].parentId, active);
   assert.equal(JSON.stringify(detail).includes('PRIVATE-TRANSCRIPT'), false);
   assert.equal(JSON.stringify(listed).includes('PRIVATE-TRANSCRIPT'), false);
+});
+
+test('task counter allowlist preserves unknown fields and rejects inconsistent complete snapshots', () => {
+  for (const counts of [
+    { input_tokens: 2, output_tokens: 1, total_tokens: 99 },
+    { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 1, total_tokens: Number.MAX_SAFE_INTEGER },
+    { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 1, total_tokens: Number.MAX_SAFE_INTEGER + 1 },
+    { input_tokens: -1, output_tokens: 2, total_tokens: 1 },
+  ]) assert.deepEqual(usageAllowlist(counts), taskUsageEmpty());
+  assert.deepEqual(usageAllowlist({ input_tokens: 7, output_tokens: null, total_tokens: 10, cached_input_tokens: 0 }), {
+    inputTokens: 7, cachedInputTokens: 0, outputTokens: null, reasoningOutputTokens: null, totalTokens: 10,
+  });
+  assert.deepEqual(usageAllowlist({ input_tokens: 0, output_tokens: 0, total_tokens: 0 }), {
+    inputTokens: 0, cachedInputTokens: null, outputTokens: 0, reasoningOutputTokens: null, totalTokens: 0,
+  });
+});
+
+test('newer invalid task totals revoke prior usage without replaying older counters and recover at zero', async (t) => {
+  const invalid = [
+    ['inconsistent total', { input_tokens: 2, output_tokens: 1, total_tokens: 99 }],
+    ['unsafe sum', { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 1, total_tokens: Number.MAX_SAFE_INTEGER }],
+    ['unsafe total', { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 1, total_tokens: Number.MAX_SAFE_INTEGER + 1 }],
+  ];
+  for (const [name, counts] of invalid) {
+    await t.test(name, async (t) => {
+      const dir = await mkdtemp(join(tmpdir(), 'codex-task-summary-'));
+      t.after(() => rm(dir, { recursive: true, force: true }));
+      const root = idFor(0x42);
+      const path = join(dir, filename(root));
+      const valid = { input_tokens: 7, output_tokens: 3, total_tokens: 10 };
+      await writeFile(path, [meta(root, root), started('turn-root', 'turn-root', -2500),
+        usage('turn-root', 'turn-root', valid, -2000, root, root)].join('\n') + '\n');
+      const summary = createTaskSummary({ sessionsDir: dir, codexHome: join(dir, 'missing'), wallClock: () => now });
+      await summary.refresh();
+      assert.equal(summary.detail(root).currentTurn.usage.totalTokens, 10);
+      await appendFile(path, [usage('turn-root', 'turn-root', counts, -1000, root, root),
+        usage('turn-root', 'turn-root', valid, -1500, root, root)].join('\n') + '\n');
+      await summary.refresh({ force: true });
+      const rejected = summary.detail(root);
+      assert.deepEqual(rejected.currentTurn.usage, taskUsageEmpty());
+      assert.equal(rejected.currentTurn.usageUpdatedAt, null);
+      assert.deepEqual(rejected.agents[0].usage, taskUsageEmpty());
+      assert.equal(rejected.agents[0].usageUpdatedAt, null);
+      const zero = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+      await appendFile(path, usage('turn-root', 'turn-root', zero, -500, root, root) + '\n');
+      await summary.refresh({ force: true });
+      const recovered = summary.detail(root);
+      assert.equal(recovered.currentTurn.usage.totalTokens, 0);
+      assert.equal(recovered.agents[0].usage.totalTokens, 0);
+      assert.equal(recovered.currentTurn.usageUpdatedAt, at(-500));
+    });
+  }
 });
 
 test('task summary keeps an idle pinned root without treating it as active', async (t) => {

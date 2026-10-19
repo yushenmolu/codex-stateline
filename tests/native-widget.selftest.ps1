@@ -2136,14 +2136,21 @@ Assert ($null -eq $window.UsageWindow) 'closing the main owner allowed a new usa
 function LiveSample([string]$id=$taskBeta,[string]$scope='conversation'){
  return @{sampledAt='2026-10-18T09:00:10.000Z';state='available';source='codex_app_server';reason=$null;observedAt='2026-10-18T09:00:05.000Z';session=@{id=$id};usage=@{scope=$scope;includesSubagents=$false;inputTokens=40;outputTokens=2;totalTokens=42};model='example-provider/gpt-6.1-sol';reasoningEffort='ultra';lifecycle=@{state='running';startedAt='2026-10-18T09:00:00.000Z';completedAt=$null;elapsedSeconds=5};speed=@{source='confirmed_request';outputTokensPerSecond=2;observedAt='2026-10-18T09:00:05.000Z'}}
 }
+function ObservedLiveSample {
+ $sample=LiveSample
+ $sample.speed=@{source='observed_window';outputTokensPerSecond=1;outputTokens=2;elapsedSeconds=2;startedAt='2026-10-18T09:00:03.000Z';observedAt='2026-10-18T09:00:05.000Z';includesToolsAndWait=$true}
+ return $sample
+}
 function ApplyLiveFixture($sample){$liveWindow.FixtureLive($true,$liveWindow.TaskGeneration,$null,([CodexNative.WidgetClient]::Serialize($sample)))}
 $liveWindow=New-Object CodexNative.WidgetWindow $true;$fixtureWindows.Add($liveWindow)
+$liveSpeedCaption=$liveWindow.GetType().GetField('speedCaption',$allFields).GetValue($liveWindow)
 $liveWindow.FixtureLive($true,$liveWindow.TaskGeneration,'disconnected',$null)
 $liveWindow.FixtureTasks($tasksJson)
 $liveSample=LiveSample
 ApplyLiveFixture $liveSample
 Assert ($liveWindow.SelectedTask -ceq $taskAlpha -and -not $liveWindow.PinnedTask -and $liveWindow.MetricControls[2].Text -ceq '42' -and $liveWindow.SelectedUsageCaptionControl.Text -match '活动对话.*22222222.*会话累计') 'live identity borrowed the latest historical task or omitted confirmed scope'
-Assert ($liveWindow.ContextText -ceq '执行模型 · example-provider/gpt-6.1-sol' -and $liveWindow.EffortText -match 'ultra' -and $liveWindow.MetricControls[3].Text -ceq '2.0' -and $liveWindow.MetricControls[3].ToolTip -match '已确认请求') 'live execution evidence or confirmed request speed did not render'
+Assert ($liveWindow.ContextText -ceq '执行模型 · example-provider/gpt-6.1-sol' -and $liveWindow.EffortText -match 'ultra' -and $liveWindow.MetricControls[3].Text -ceq '2.0' -and $liveWindow.MetricControls[3].ToolTip -match '已确认请求' -and $liveSpeedCaption.Text -ceq '请求均速 token/s') 'live execution evidence or confirmed request speed did not render'
+Assert ($liveWindow.SelectedUsageCaptionControl.ToolTip -match '输入含缓存与多次请求的重复输入' -and $liveWindow.SelectedUsageCaptionControl.ToolTip -match '先前基线' -and $liveWindow.SelectedUsageCaptionControl.ToolTip -match '不等于本机扫描的已核实历史合计' -and $liveWindow.SelectedUsageCaptionControl.ToolTip -match '上下文占用或账户账单') 'live conversation cumulative tooltip omitted its accounting limits or unknown prior baseline'
 $gatewayLive=LiveSample;$gatewayLive.source='magpie_gateway';$gatewayLive.usage.includesSubagents=$true;$gatewayLive.lifecycle.state='completed';$gatewayLive.lifecycle.completedAt=$gatewayLive.observedAt
 ApplyLiveFixture $gatewayLive
 Assert ($liveWindow.SelectedUsageStateControl.Text -match 'Magpie.*已完成' -and $liveWindow.SelectedUsageCaptionControl.ToolTip -match '包含已核实代理' -and $liveWindow.MetricControls[2].Text -ceq '42') 'confirmed gateway lifecycle or subagent scope did not render'
@@ -2174,6 +2181,56 @@ Assert ($liveWindow.MetricsVisible -and $liveWindow.MetricControls[2].Text -ceq 
 $zeroLive=LiveSample;$zeroLive.usage.inputTokens=0;$zeroLive.usage.outputTokens=0;$zeroLive.usage.totalTokens=0;$zeroLive.speed.outputTokensPerSecond=0
 ApplyLiveFixture $zeroLive
 Assert ($liveWindow.MetricControls[0].Text -ceq '0' -and $liveWindow.MetricControls[1].Text -ceq '0' -and $liveWindow.MetricControls[2].Text -ceq '0' -and $liveWindow.MetricControls[3].Text -ceq '0') 'confirmed zero was confused with unknown live usage'
+$observedLive=ObservedLiveSample
+ApplyLiveFixture $observedLive
+Assert ($liveWindow.MetricControls[2].Text -ceq '42' -and $liveWindow.MetricControls[3].Text -ceq '1.0' -and $liveSpeedCaption.Text -ceq '观测均速 ≈ token/s') 'observed cumulative-delta speed did not render as an estimate'
+$observedSpeedTip=[string]$liveWindow.MetricControls[3].ToolTip
+Assert ($observedSpeedTip -match '已确认累计输出差量 / 观测时间' -and $observedSpeedTip -match '估算，包含工具、等待和用量上报延迟' -and $observedSpeedTip -match '不代表模型逐token流速' -and $observedSpeedTip -match '输出差量 2 tokens' -and $observedSpeedTip -match '观测时间 2 s' -and $observedSpeedTip -match '2026-10-18T09:00:03.000Z' -and $observedSpeedTip -match '2026-10-18T09:00:05.000Z' -and [Windows.Automation.AutomationProperties]::GetHelpText($liveWindow.MetricControls[3]) -ceq $observedSpeedTip -and [string]$liveSpeedCaption.ToolTip -ceq $observedSpeedTip) 'observed speed lost exact numerator, denominator, source clocks or accessible estimation limits'
+$noSpeedLive=LiveSample;$noSpeedLive.speed=$null
+ApplyLiveFixture $noSpeedLive
+Assert ($liveWindow.MetricControls[2].Text -ceq '42' -and $liveWindow.MetricControls[3].Text -ceq '—' -and $liveSpeedCaption.Text -ceq '观测均速 · 待采样' -and $liveWindow.MetricControls[3].ToolTip -match '同一对话至少两次有效计数更新' -and $liveWindow.MetricControls[3].ToolTip -match '断连、无更新或计数回退会清除' -and $liveWindow.MetricControls[3].ToolTip -notmatch '输出差量 2 tokens') 'null speed retained a previous rate, denominator or misleading request caption'
+$observedZero=ObservedLiveSample;$observedZero.usage.inputTokens=0;$observedZero.usage.outputTokens=0;$observedZero.usage.totalTokens=0;$observedZero.speed.outputTokens=0;$observedZero.speed.outputTokensPerSecond=0
+ApplyLiveFixture $observedZero
+Assert ($liveWindow.MetricControls[3].Text -ceq '0' -and $liveSpeedCaption.Text -ceq '观测均速 ≈ token/s') 'valid zero observed delta was treated as unknown'
+$observedTolerance=ObservedLiveSample;$observedTolerance.speed.elapsedSeconds=2.001;$observedTolerance.speed.outputTokensPerSecond=2/2.001
+ApplyLiveFixture $observedTolerance
+Assert ($liveWindow.MetricControls[2].Text -ceq '42' -and $liveWindow.MetricControls[3].Text -ceq '1.0') 'observed duration rejected the allowed one-millisecond clock tolerance'
+$observedTtlBoundary=ObservedLiveSample;$observedTtlBoundary.speed.startedAt='2026-10-18T08:59:08.000Z';$observedTtlBoundary.speed.observedAt='2026-10-18T08:59:10.000Z'
+ApplyLiveFixture $observedTtlBoundary
+Assert ($liveWindow.MetricControls[3].Text -ceq '1.0') 'observed speed expired at the inclusive sixty-second freshness boundary'
+$badObservedCases=@('denominator-zero','denominator-short','denominator-long','denominator-string','duration-mismatch','rate-mismatch','negative-output','fractional-output','unsafe-output','string-output','excess-output','started-after-observation','started-invalid','non-utc-start','speed-after-source','speed-after-poll','expired','missing-usage','wrong-scope','includes-wait-false','includes-wait-string')
+foreach($fault in $badObservedCases){
+ $badObserved=ObservedLiveSample
+ switch($fault){
+  'denominator-zero' {$badObserved.speed.elapsedSeconds=0}
+  'denominator-short' {$badObserved.speed.elapsedSeconds=0.5;$badObserved.speed.startedAt='2026-10-18T09:00:04.500Z';$badObserved.speed.outputTokensPerSecond=4}
+  'denominator-long' {$badObserved.speed.elapsedSeconds=120.001;$badObserved.speed.startedAt='2026-10-18T08:58:04.999Z';$badObserved.speed.outputTokensPerSecond=2/120.001}
+  'denominator-string' {$badObserved.speed.elapsedSeconds='2'}
+  'duration-mismatch' {$badObserved.speed.elapsedSeconds=2.002;$badObserved.speed.outputTokensPerSecond=2/2.002}
+  'rate-mismatch' {$badObserved.speed.outputTokensPerSecond=1.1}
+  'negative-output' {$badObserved.speed.outputTokens=-1;$badObserved.speed.outputTokensPerSecond=0}
+  'fractional-output' {$badObserved.speed.outputTokens=1.5;$badObserved.speed.outputTokensPerSecond=0.75}
+  'unsafe-output' {$badObserved.speed.outputTokens=9007199254740992;$badObserved.speed.outputTokensPerSecond=4503599627370496}
+  'string-output' {$badObserved.speed.outputTokens='2'}
+  'excess-output' {$badObserved.speed.outputTokens=3;$badObserved.speed.outputTokensPerSecond=1.5}
+  'started-after-observation' {$badObserved.speed.startedAt='2026-10-18T09:00:06.000Z'}
+  'started-invalid' {$badObserved.speed.startedAt='invalid'}
+  'non-utc-start' {$badObserved.speed.startedAt='2026-10-18T17:00:03.000+08:00'}
+  'speed-after-source' {$badObserved.speed.startedAt='2026-10-18T09:00:04.000Z';$badObserved.speed.observedAt='2026-10-18T09:00:06.000Z'}
+  'speed-after-poll' {$badObserved.observedAt='2026-10-18T09:00:11.000Z';$badObserved.speed.startedAt='2026-10-18T09:00:09.000Z';$badObserved.speed.observedAt=$badObserved.observedAt}
+  'expired' {$badObserved.speed.startedAt='2026-10-18T08:59:07.999Z';$badObserved.speed.observedAt='2026-10-18T08:59:09.999Z'}
+  'missing-usage' {$badObserved.usage=$null}
+  'wrong-scope' {$badObserved.usage.scope='request'}
+  'includes-wait-false' {$badObserved.speed.includesToolsAndWait=$false}
+  'includes-wait-string' {$badObserved.speed.includesToolsAndWait='true'}
+ }
+ ApplyLiveFixture $badObserved
+ Assert ($liveWindow.MetricControls[2].Text -ceq '—' -and $liveWindow.MetricControls[3].Text -ceq '—' -and $liveWindow.SelectedUsageStateControl.Text -match '实时数据无效' -and $liveSpeedCaption.Text -ceq '观测均速 · 待采样') ('invalid observed speed was displayed or retained: '+$fault)
+ ApplyLiveFixture (ObservedLiveSample)
+ Assert ($liveWindow.MetricControls[2].Text -ceq '42' -and $liveWindow.MetricControls[3].Text -ceq '1.0') ('valid observed speed could not recover: '+$fault)
+}
+ApplyLiveFixture (LiveSample)
+Assert ($liveWindow.MetricControls[3].Text -ceq '2.0' -and $liveSpeedCaption.Text -ceq '请求均速 token/s' -and $liveWindow.MetricControls[3].ToolTip -match '已确认请求') 'confirmed request speed compatibility failed after observed-window samples'
 $badLiveCases=@('source','source-none','scope','identity','identity-newline','sum','negative','unsafe-integer','string-count','agents','model','configured-model','effort','configured-effort','speed-source','speed-future','speed-negative','lifecycle','lifecycle-time','reason','observedAt','sampledAt')
 foreach($fault in $badLiveCases){
  $badLive=LiveSample

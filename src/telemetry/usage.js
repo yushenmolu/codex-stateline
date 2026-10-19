@@ -5,6 +5,17 @@ const FILE = new RegExp(`^rollout-[0-9T:.Z-]+-(${UUID})(?:[_-](${UUID}))?\.jsonl
 const TYPES = new Set(['session_meta', 'event_msg']);
 const SESSION_ID = new RegExp(`^${UUID}$`);
 const safeInt = (value) => Number.isSafeInteger(value) && value >= 0;
+const COUNTER_KEYS = ['input_tokens', 'output_tokens', 'total_tokens'];
+
+function validCounters(value) {
+  return Boolean(value) && COUNTER_KEYS.every((key) => safeInt(value[key]))
+    && safeInt(value.input_tokens + value.output_tokens)
+    && value.total_tokens === value.input_tokens + value.output_tokens;
+}
+
+function invalidCompleteCounters(value) {
+  return Boolean(value) && COUNTER_KEYS.every((key) => value[key] != null) && !validCounters(value);
+}
 
 export function sessionIdFromFilename(filename) {
   return basename(filename).match(FILE)?.[1] ?? null;
@@ -47,7 +58,7 @@ export function parseUsageLine(line, expectedSessionId, now = Date.now()) {
   if (values.every((value) => value == null)) {
     return { type: 'token_count', timestamp, sessionId: expectedSessionId, usage: null };
   }
-  if (!values.every(safeInt)) throw new Error('invalid_usage');
+  if (!validCounters(usage)) throw new Error('invalid_usage');
   return {
     type: 'token_count', timestamp, sessionId: expectedSessionId,
     usage: { inputTokens: values[0], outputTokens: values[1], totalTokens: values[2] },
@@ -83,7 +94,7 @@ export function unavailableTelemetry(reason = 'no_session', state = 'unavailable
   };
 }
 function counters(v) {
-  if (!v || ![v.input_tokens, v.output_tokens, v.total_tokens].every(safeInt) || v.total_tokens !== v.input_tokens + v.output_tokens) return null;
+  if (!validCounters(v)) return null;
   return { inputTokens: v.input_tokens, outputTokens: v.output_tokens, totalTokens: v.total_tokens };
 }
 // Association data only; payload text is never retained.
@@ -268,10 +279,11 @@ export function projectTelemetry(s, dual = false) {
 const TASK_TYPES = new Set(['session_meta', 'turn_context', 'task_started', 'task_complete', 'turn_aborted', 'token_usage_record']);
 const ROLE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 
-// Fixed allowlist. Absent or malformed counters become null and cumulative
-// values are never added, subtracted or rescaled here.
+// Incomplete snapshots retain unknown fields. A contradictory complete
+// snapshot is rejected as a whole rather than exposing a partial total.
 export function usageAllowlist(raw) {
   const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : null;
+  if (invalidCompleteCounters(source)) return taskUsageEmpty();
   const pick = (key) => (source && safeInt(source[key]) ? source[key] : null);
   return {
     inputTokens: pick('input_tokens'),
@@ -317,10 +329,12 @@ export function parseTaskLine(line, now = Date.now()) {
   }
   if (type === 'token_usage_record') {
     const turnUsage = payload.turn_token_usage;
+    const source = turnUsage && typeof turnUsage === 'object' && !Array.isArray(turnUsage) ? turnUsage : null;
+    const usageInvalid = invalidCompleteCounters(source);
     return { ...base, thread: validId(payload.thread_id) ? payload.thread_id : null,
       sessionId: validId(payload.session_id) ? payload.session_id : null,
       response: validId(payload.response_id) ? payload.response_id : null,
-      usage: turnUsage && typeof turnUsage === 'object' && !Array.isArray(turnUsage) ? usageAllowlist(turnUsage) : null };
+      usage: source && !usageInvalid ? usageAllowlist(source) : null, usageInvalid };
   }
   return base;
 }

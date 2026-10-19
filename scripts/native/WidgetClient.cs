@@ -59,8 +59,8 @@ public sealed class WidgetWindow:Window {
    Window usageWindow;ScrollViewer usageWindowViewport;Border usageView;Button usageButton;Slider usageRange;Grid usageBars;TextBlock usageRangeLabel,usageRangeTotal,usageChartNote,usageProgress,usageScale,usageChartStart,usageChartEnd;readonly List<Border> usageBarControls=new List<Border>();readonly List<TextBlock> usageRangeLabels=new List<TextBlock>();
    static readonly string[] UsageRangeIds={"today","7d","30d","90d","all"};static readonly string[] UsageRangeTitles={"今天","最近 7 天","最近 30 天","最近 90 天","全部记录"};
    sealed class LiveSnapshot{
-    public string Instance,SessionId,SampledAt,ObservedAt,State,Source,Reason,Scope,Model,Effort,Lifecycle,SpeedObservedAt;
-    public int ServiceGeneration,SelectionGeneration;public UsageTriple Usage;public bool IncludesSubagents,HasSpeed;public double Speed;
+    public string Instance,SessionId,SampledAt,ObservedAt,State,Source,Reason,Scope,Model,Effort,Lifecycle,SpeedSource,SpeedStartedAt,SpeedObservedAt;
+    public int ServiceGeneration,SelectionGeneration;public UsageTriple Usage;public bool IncludesSubagents,HasSpeed;public double Speed,SpeedElapsedSeconds;public long SpeedOutputTokens;
    }
    LiveSnapshot liveSnapshot;string liveResponseSeen,liveObservedSeen,liveObservedSession;bool liveModeSeen=true,lastLiveSupported;
    sealed class UsageTriple{
@@ -409,8 +409,19 @@ public sealed class WidgetWindow:Window {
      }
      var speed=WidgetClient.Obj(WidgetClient.Get(data,"speed"));
      if(WidgetClient.Get(data,"speed")!=null){
-      double rate;if(!identity||speed==null||WidgetClient.Str(speed,"source")!="confirmed_request"||!TimestampValid(WidgetClient.Get(speed,"observedAt"))||!ComparisonNumber(WidgetClient.Get(speed,"outputTokensPerSecond"),out rate)||rate<0||CompareObserved(WidgetClient.Str(speed,"observedAt"),sample.ObservedAt)>0)return false;
-      sample.HasSpeed=true;sample.Speed=rate;sample.SpeedObservedAt=WidgetClient.Str(speed,"observedAt");
+      double rate;if(!identity||speed==null||!TimestampValid(WidgetClient.Get(speed,"observedAt"))||!ComparisonNumber(WidgetClient.Get(speed,"outputTokensPerSecond"),out rate)||rate<0||CompareObserved(WidgetClient.Str(speed,"observedAt"),sample.ObservedAt)>0)return false;
+      string speedSource=WidgetClient.Str(speed,"source"),speedObservedAt=WidgetClient.Str(speed,"observedAt");
+      if(speedSource=="observed_window"){
+       long deltaOutput;double elapsed;string started=WidgetClient.Str(speed,"startedAt");
+       if(sample.Usage==null||sample.Scope!="conversation"||!UsageRecordCount(WidgetClient.Get(speed,"outputTokens"),out deltaOutput)||deltaOutput>sample.Usage.Output||!ComparisonNumber(WidgetClient.Get(speed,"elapsedSeconds"),out elapsed)||elapsed<1||elapsed>120||!TimestampValid(WidgetClient.Get(speed,"startedAt"))||!(WidgetClient.Get(speed,"includesToolsAndWait") is bool)||!(bool)WidgetClient.Get(speed,"includesToolsAndWait")||CompareObserved(speedObservedAt,sample.SampledAt)>0)return false;
+       var from=DateTimeOffset.Parse(started,System.Globalization.CultureInfo.InvariantCulture,System.Globalization.DateTimeStyles.RoundtripKind);
+       var to=DateTimeOffset.Parse(speedObservedAt,System.Globalization.CultureInfo.InvariantCulture,System.Globalization.DateTimeStyles.RoundtripKind);
+       var sampled=DateTimeOffset.Parse(sample.SampledAt,System.Globalization.CultureInfo.InvariantCulture,System.Globalization.DateTimeStyles.RoundtripKind);
+       double actual=(to-from).TotalSeconds,expected=deltaOutput/elapsed;
+       if(actual<0||Math.Abs(actual-elapsed)>0.001+1e-9||(sampled-to).TotalSeconds>60||Math.Abs(rate-expected)>1e-9*Math.Max(1,expected))return false;
+       sample.SpeedStartedAt=started;sample.SpeedOutputTokens=deltaOutput;sample.SpeedElapsedSeconds=elapsed;
+      }else if(speedSource!="confirmed_request")return false;
+      sample.HasSpeed=true;sample.Speed=rate;sample.SpeedSource=speedSource;sample.SpeedObservedAt=speedObservedAt;
      }
      if(sample.Usage==null){sample.State="waiting";if(String.IsNullOrEmpty(sample.Reason))sample.Reason="usage_unconfirmed";}
      return true;
@@ -439,6 +450,7 @@ public sealed class WidgetWindow:Window {
      selectedUsageCaption.Text=identity+(id==null?"":" · "+ShortId(id))+" · "+scope;
      string source=sample==null||sample.Source=="none"?"尚未连接":sample.Source=="codex_app_server"?"Codex app-server 事件":"Magpie 网关已确认事件";
      string tip=identity+(id==null?"":" · "+id)+"；实时来源："+source+(hasUsage?"；"+scope+(sample.IncludesSubagents?"，包含已核实代理":"，不包含代理用量"):"；用量未确认")+(sample!=null&&!String.IsNullOrEmpty(sample.ObservedAt)?"；源更新时间 "+LocalClock(sample.ObservedAt):"");
+     if(hasUsage&&sample.Scope=="conversation")tip+="\n输入含缓存与多次请求的重复输入；会话累计可能包含先前基线，不等于本机扫描的已核实历史合计，也不是上下文占用或账户账单。";
      selectedUsageCaption.ToolTip=tip;System.Windows.Automation.AutomationProperties.SetHelpText(selectedUsageCaption,tip);
      string[] labels={"输入","输出","合计"};long[] values=hasUsage?new[]{sample.Usage.Input,sample.Usage.Output,sample.Usage.Total}:new long[3];
      for(int i=0;i<3;i++){metrics[i].Text=hasUsage?CountFormatter(values[i]):"—";string exact=hasUsage?labels[i]+" · "+values[i].ToString(System.Globalization.CultureInfo.InvariantCulture)+" tokens":null;metrics[i].ToolTip=exact;System.Windows.Automation.AutomationProperties.SetHelpText(metrics[i],exact??"");}
@@ -448,7 +460,9 @@ public sealed class WidgetWindow:Window {
      ShowUsageState(selectedUsageState,state,tip);selectedUsageActive=true;metricsGrid.Visibility=System.Windows.Visibility.Visible;
      contextLabel.Text=available&&sample.Model!=null?"执行模型 · "+sample.Model:"执行模型 · 未确认";contextLabel.ToolTip="仅显示实时事件确认的执行模型；配置默认值不作为执行证据。";contextLabel.Visibility=System.Windows.Visibility.Visible;
      effortLabel.Text=available&&sample.Effort!=null?"推理强度 · "+sample.Effort+"（"+Label(sample.Effort)+"）":"推理强度 · 未确认";effortLabel.ToolTip="仅显示实时事件确认的推理强度。";effortLabel.Visibility=System.Windows.Visibility.Visible;
-     bool speed=available&&sample.HasSpeed;metrics[3].Text=speed?Number(sample.Speed):"—";speedCaption.Text=speed?"请求均速 token/s":"请求均速 · 未确认";string speedTip=speed?"已确认请求的输出平均速度；源更新时间 "+LocalClock(sample.SpeedObservedAt):"尚无已确认请求速度；不会用日志已完成回合速度代替。";metrics[3].ToolTip=speedTip;System.Windows.Automation.AutomationProperties.SetHelpText(metrics[3],speedTip);speedPanel.Visibility=telemetryMetadata.Visibility=System.Windows.Visibility.Visible;
+     bool speed=available&&sample.HasSpeed,observedSpeed=speed&&sample.SpeedSource=="observed_window";metrics[3].Text=speed?Number(sample.Speed):"—";speedCaption.Text=observedSpeed?"观测均速 ≈ token/s":speed?"请求均速 token/s":"观测均速 · 待采样";
+     string speedTip=observedSpeed?"已确认累计输出差量 / 观测时间；估算，包含工具、等待和用量上报延迟，不代表模型逐token流速。\n输出差量 "+sample.SpeedOutputTokens.ToString(System.Globalization.CultureInfo.InvariantCulture)+" tokens；观测时间 "+sample.SpeedElapsedSeconds.ToString("R",System.Globalization.CultureInfo.InvariantCulture)+" s\n起始 "+sample.SpeedStartedAt+"；结束 "+sample.SpeedObservedAt+"（UTC）；超过 60 秒无新数据即清除。":speed?"已确认请求的输出平均速度；源更新时间 "+LocalClock(sample.SpeedObservedAt):"需要同一对话至少两次有效计数更新，才能用已确认累计输出差量 / 观测时间估算；断连、无更新或计数回退会清除速度。估算包含工具、等待和用量上报延迟，不代表模型逐token流速。";
+     metrics[3].ToolTip=speedCaption.ToolTip=speedTip;System.Windows.Automation.AutomationProperties.SetHelpText(metrics[3],speedTip);System.Windows.Automation.AutomationProperties.SetHelpText(speedCaption,speedTip);speedPanel.Visibility=telemetryMetadata.Visibility=System.Windows.Visibility.Visible;
      status.Text=sample!=null&&sample.State=="available"&&hasUsage?"":"○ "+state;status.Visibility=status.Text.Length==0?System.Windows.Visibility.Collapsed:System.Windows.Visibility.Visible;
     }
     SelectedSnapshot EnsureSelectedSnapshot(){

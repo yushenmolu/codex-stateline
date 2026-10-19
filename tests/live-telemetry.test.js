@@ -182,3 +182,88 @@ test('unverified ancestry cannot silently become the unique active primary', () 
   s.emit({ type: 'conversation', threadId: THREAD, primary: false, state: 'active', usage: USAGE });
   assert.equal(s.live.snapshot().session.id, OTHER);
 });
+
+test('live estimates observed output from same-conversation usage updates with a verifiable denominator', () => {
+  const s = setup(); s.connect();
+  const conversation = (usage) => s.emit({ type: 'conversation', threadId: THREAD, primary: true, state: 'active', usage });
+  conversation(USAGE);
+  assert.equal(s.live.snapshot().speed, null);
+  s.advance(20_000);
+  conversation({ inputTokens: 200, outputTokens: 80, totalTokens: 280 });
+  const speed = s.live.snapshot().speed;
+  assert.deepEqual(speed, {
+    source: 'observed_window', outputTokensPerSecond: 3, outputTokens: 60, elapsedSeconds: 20,
+    startedAt: new Date(NOW).toISOString(), observedAt: new Date(NOW + 20_000).toISOString(), includesToolsAndWait: true,
+  });
+  s.advance(10_000);
+  conversation({ inputTokens: 200, outputTokens: 80, totalTokens: 280 });
+  assert.deepEqual(s.live.snapshot().speed, speed, 'unrelated IPC patches cannot advance the speed timestamp');
+  s.advance(50_001); s.emit({ type: 'heartbeat' });
+  assert.equal(s.live.snapshot().speed, null, 'old rate expires even while connection heartbeats continue');
+});
+
+test('live speed clears on invalid usage, regressions, source reset, inactivity, and identity changes', () => {
+  for (const mode of ['invalid', 'regression', 'disconnect', 'idle', 'long-gap', 'out-of-order', 'switch']) {
+    const s = setup(); s.connect();
+    const conversation = (usage, rest = {}) => s.emit({ type: 'conversation', threadId: THREAD, primary: true, state: 'active', usage, ...rest });
+    conversation(USAGE); s.advance(10_000);
+    const higher = { inputTokens: 200, outputTokens: 50, totalTokens: 250 };
+    conversation(higher);
+    assert.ok(s.live.snapshot().speed, mode);
+    if (mode === 'invalid') conversation(null);
+    if (mode === 'regression') conversation(USAGE);
+    if (mode === 'disconnect') { s.disconnect(); s.connect(); conversation(higher); }
+    if (mode === 'idle') { conversation(higher, { state: 'idle' }); conversation(higher); }
+    if (mode === 'long-gap') { s.advance(60_001); conversation({ inputTokens: 300, outputTokens: 70, totalTokens: 370 }); }
+    if (mode === 'out-of-order') conversation({ inputTokens: 300, outputTokens: 70, totalTokens: 370 }, { observedAt: new Date(NOW + 9_000).toISOString() });
+    if (mode === 'switch') {
+      s.emit({ type: 'removed', threadId: THREAD });
+      conversation(higher, { threadId: OTHER });
+    }
+    // Out-of-order data is ignored; it must not produce a new estimate.
+    if (mode === 'out-of-order') assert.equal(s.live.snapshot().speed.outputTokens, 30);
+    else assert.equal(s.live.snapshot().speed, null, mode);
+  }
+});
+
+test('a newer invalid turn usage event revokes prior counters and speed without letting older usage revive them', () => {
+  const s = setup(); s.connect(); s.thread(); s.turn(); s.usage(); s.advance(10_000);
+  s.usage({ inputTokens: 200, outputTokens: 50, totalTokens: 250 });
+  assert.ok(s.live.snapshot().speed);
+  s.advance(1_000);
+  s.usage({ inputTokens: 200, outputTokens: 50, totalTokens: 999 });
+  assert.equal(s.live.snapshot().usage, null);
+  assert.equal(s.live.snapshot().speed, null);
+  s.emit({ type: 'usage', threadId: THREAD, turnId: TURN, usage: USAGE, observedAt: new Date(NOW).toISOString() });
+  assert.equal(s.live.snapshot().usage, null);
+  s.advance(1_000); s.usage({ inputTokens: 200, outputTokens: 50, totalTokens: 250 });
+  assert.equal(s.live.snapshot().usage.totalTokens, 250);
+  assert.equal(s.live.snapshot().speed, null, 'recovery starts a fresh speed baseline');
+});
+
+test('observed speed projection rejects inconsistent, stale and unrelated values without hiding confirmed usage', () => {
+  const value = {
+    sampledAt: new Date(NOW).toISOString(), state: 'available', source: 'codex_app_server', reason: null,
+    observedAt: new Date(NOW).toISOString(), session: { id: THREAD },
+    usage: { scope: 'conversation', includesSubagents: false, ...USAGE },
+    speed: { source: 'observed_window', outputTokensPerSecond: 2, outputTokens: 20, elapsedSeconds: 10,
+      startedAt: new Date(NOW - 10_000).toISOString(), observedAt: new Date(NOW).toISOString(), includesToolsAndWait: true, private: 'hidden' },
+  };
+  assert.equal(publicLiveSnapshot(value, { now: NOW }).speed.outputTokensPerSecond, 2);
+  assert.equal(JSON.stringify(publicLiveSnapshot(value, { now: NOW })).includes('hidden'), false);
+  for (const scope of ['turn', 'request']) {
+    const result = publicLiveSnapshot({ ...value, usage: { ...value.usage, scope } }, { now: NOW });
+    assert.equal(result.speed, null);
+    assert.equal(result.usage.totalTokens, 120);
+  }
+  for (const change of [
+    { outputTokensPerSecond: 999 }, { outputTokens: 21 }, { elapsedSeconds: 0 }, { elapsedSeconds: 121 },
+    { outputTokens: Number.MAX_SAFE_INTEGER + 1 }, { includesToolsAndWait: false }, { startedAt: 'invalid' },
+    { observedAt: new Date(NOW + 1).toISOString() },
+    { startedAt: new Date(NOW - 70_001).toISOString(), observedAt: new Date(NOW - 60_001).toISOString() },
+  ]) {
+    const result = publicLiveSnapshot({ ...value, speed: { ...value.speed, ...change } }, { now: NOW });
+    assert.equal(result.speed, null, JSON.stringify(change));
+    assert.equal(result.usage.totalTokens, 120);
+  }
+});

@@ -264,7 +264,9 @@ function apply(entry, event) {
     return;
   }
   if (event.type === 'token_usage_record') {
-    if (event.usage && (record.usageAt === null || event.timestamp >= record.usageAt)) {
+    if ((event.usage || event.usageInvalid) && (record.usageAt === null || event.timestamp >= record.usageAt)) {
+      // Rejected newer counters revoke old values while retaining the ordering
+      // watermark, so a later replay cannot resurrect an older snapshot.
       record.usage = event.usage; record.usageAt = event.timestamp;
     }
     // Usage is an accounting signal, not a lifecycle one: it may advance
@@ -492,7 +494,7 @@ function agentProjection(entry, rootTurnId) {
     state: turnState(record),
     updatedAt: entry.latest === null ? null : new Date(entry.latest).toISOString(),
     usage,
-    usageUpdatedAt: record?.usageAt == null ? null : new Date(record.usageAt).toISOString(),
+    usageUpdatedAt: record?.usage == null || record.usageAt == null ? null : new Date(record.usageAt).toISOString(),
   };
 }
 
@@ -685,7 +687,7 @@ export function createTaskSummary({
           stale: updatedAt === null || now - updatedAt > STALE_MS || budget.lag,
           truncated: cap || partial || truncated,
           currentTurn: current ? { id: current.turn, usage: current.usage ?? taskUsageEmpty(),
-            usageUpdatedAt: current.usageAt == null ? null : new Date(current.usageAt).toISOString() } : null,
+            usageUpdatedAt: current.usage == null || current.usageAt == null ? null : new Date(current.usageAt).toISOString() } : null,
           agents: agents.slice(0, MAX_AGENTS),
         });
       }

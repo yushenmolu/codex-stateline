@@ -302,6 +302,31 @@ test('usage parser rejects malformed, future, mismatched and invalid counter rec
   assert.deepEqual(parseUsageLine(tokenLine({ input_tokens: null, output_tokens: null, total_tokens: null }), id, now).usage, null);
 });
 
+test('usage counters reject inconsistent or unsafe totals before session publication and preserve zero', async (t) => {
+  const invalid = [
+    ['inconsistent total', { input_tokens: 2, output_tokens: 1, total_tokens: 99 }],
+    ['unsafe sum', { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 1, total_tokens: Number.MAX_SAFE_INTEGER }],
+    ['unsafe total', { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 1, total_tokens: Number.MAX_SAFE_INTEGER + 1 }],
+  ];
+  for (const [name, usage] of invalid) {
+    await t.test(name, async (t) => {
+      assert.throws(() => parseUsageLine(tokenLine(usage), id, now), /invalid_usage/);
+      const dir = await tempDirectory(t);
+      await writeSession(dir, id, { lines: [metaLine(id), tokenLine({ input_tokens: 1, output_tokens: 1, total_tokens: 2 }), tokenLine(usage)] });
+      const result = await readActiveSession({ sessionsDir: dir, wallClock: () => now });
+      assert.equal(result.state, 'unavailable');
+      assert.deepEqual(result.usage, { inputTokens: null, outputTokens: null, totalTokens: null });
+    });
+  }
+  for (const usage of [
+    { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+    { input_tokens: Number.MAX_SAFE_INTEGER - 1, output_tokens: 1, total_tokens: Number.MAX_SAFE_INTEGER },
+  ]) {
+    assert.deepEqual(parseUsageLine(tokenLine(usage), id, now).usage,
+      { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens, totalTokens: usage.total_tokens });
+  }
+});
+
 test('forks ignore inherited VS Code metadata without treating it as current-session activity', async (t) => {
   const parent = idFor(1);
   const inherited = { timestamp: iso, type: 'session_meta', payload: {

@@ -34,3 +34,39 @@ export function createSpeedTracker({ monotonicClock = () => performance.now() } 
   }
   return { observe, current, reset };
 }
+
+export function createObservedSpeedTracker({ monotonicClock = () => performance.now() } = {}) {
+  const windowMs = 120_000, maxGapMs = 60_000;
+  let sessionId = null, points = [], estimate = null;
+  const validUsage = (usage) => usage && ['inputTokens', 'outputTokens', 'totalTokens'].every((key) => Number.isSafeInteger(usage[key]) && usage[key] >= 0)
+    && Number.isSafeInteger(usage.inputTokens + usage.outputTokens) && usage.totalTokens === usage.inputTokens + usage.outputTokens;
+
+  function reset() { sessionId = null; points = []; estimate = null; }
+  function current(now = monotonicClock()) {
+    const last = points.at(-1);
+    return estimate && last && now >= last.at && now - last.at <= maxGapMs ? { ...estimate } : null;
+  }
+  function observe(id, usage, observedAt, now = monotonicClock()) {
+    const wall = typeof observedAt === 'string' ? Date.parse(observedAt) : NaN;
+    if (!id || !validUsage(usage) || !Number.isFinite(wall) || !Number.isFinite(now)) { reset(); return null; }
+    const last = points.at(-1);
+    const gap = last ? now - last.at : 0, wallGap = last ? wall - last.wall : 0;
+    if (id !== sessionId || (last && (gap < 0 || gap > maxGapMs || wallGap < 0 || Math.abs(wallGap - gap) > 1_000
+      || ['inputTokens', 'outputTokens', 'totalTokens'].some((key) => usage[key] < last[key])))) reset();
+    sessionId = id;
+    const previous = points.at(-1);
+    // Unchanged IPC patches are not new usage samples and cannot renew a rate.
+    if (previous && ['inputTokens', 'outputTokens', 'totalTokens'].every((key) => usage[key] === previous[key])) return current(now);
+    points.push({ ...usage, at: now, wall, observedAt });
+    while (points.length > 128 || points.length > 1 && (now - points[0].at > windowMs || wall - points[0].wall > windowMs)) points.shift();
+    const first = points[0], elapsedSeconds = (wall - first.wall) / 1000;
+    if (points.length < 2 || elapsedSeconds < 1 || elapsedSeconds > 120 || now - first.at < 1_000) { estimate = null; return null; }
+    const outputTokens = usage.outputTokens - first.outputTokens;
+    estimate = {
+      source: 'observed_window', outputTokensPerSecond: outputTokens / elapsedSeconds,
+      outputTokens, elapsedSeconds, startedAt: first.observedAt, observedAt, includesToolsAndWait: true,
+    };
+    return current(now);
+  }
+  return { observe, current, reset };
+}
