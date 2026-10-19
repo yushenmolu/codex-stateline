@@ -10,6 +10,8 @@ const MAX_THREADS = 128;
 const safeInt = (value) => Number.isSafeInteger(value) && value >= 0;
 const object = (value) => value && typeof value === 'object' && !Array.isArray(value);
 const time = (value) => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : null;
+// 'configured' is a request sentinel, never evidence of the model that ran.
+const liveModel = (value) => validModel(value) && value !== 'configured' ? value : null;
 
 function usage(value) {
   if (!object(value) || !['inputTokens', 'outputTokens', 'totalTokens'].every((key) => safeInt(value[key]))
@@ -43,7 +45,7 @@ export function publicLiveSnapshot(value, { taskId = null, now = Date.now() } = 
   if (confirmed && ['conversation', 'turn', 'request'].includes(value.usage.scope) && typeof value.usage.includesSubagents === 'boolean') {
     result.usage = { scope: value.usage.scope, includesSubagents: value.usage.includesSubagents, ...confirmed };
   }
-  result.model = validModel(value.model) ? value.model : null;
+  result.model = liveModel(value.model);
   result.reasoningEffort = validEffort(value.reasoningEffort) ? value.reasoningEffort : null;
   const lifecycle = value.lifecycle;
   if (object(lifecycle) && LIFECYCLES.has(lifecycle.state)) {
@@ -118,7 +120,8 @@ export function createLiveTelemetry({ connector = null, wallClock = () => Date.n
       thread.lifecycle = event.state === 'active'
         ? { state: 'running', startedAt: null, completedAt: null, elapsedSeconds: null }
         : null;
-      thread.model = null; thread.reasoningEffort = null;
+      if (Object.hasOwn(event, 'model')) thread.model = liveModel(event.model);
+      if (Object.hasOwn(event, 'reasoningEffort')) thread.reasoningEffort = validEffort(event.reasoningEffort) ? event.reasoningEffort : null;
       if (event.state === 'active') thread.speedTracker.observe(thread.id, total, observedAt);
       else thread.speedTracker.reset();
     } else if (event.type === 'thread') {
@@ -130,8 +133,8 @@ export function createLiveTelemetry({ connector = null, wallClock = () => Date.n
       thread.turnId = event.turnId;
       thread.state = 'active';
       thread.lifecycle = { state: 'running', startedAt: time(event.startedAt), completedAt: null, elapsedSeconds: null };
-      // Runtime configuration is not proof of the model executing this turn.
-      thread.model = null; thread.reasoningEffort = null; thread.speedTracker.reset();
+      // The model is thread state reported by the runtime snapshot, not turn configuration.
+      thread.speedTracker.reset();
     } else if (event.type === 'turn_completed') {
       if (event.turnId !== thread.turnId || !LIFECYCLES.has(event.state) || event.state === 'running') return;
       thread.state = event.state === 'failed' ? 'failed' : 'idle';

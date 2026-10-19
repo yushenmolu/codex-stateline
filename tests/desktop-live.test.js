@@ -10,6 +10,7 @@ const CLIENT = 'status-reader';
 const OWNER = 'desktop-owner';
 const NOW = Date.parse('2026-10-18T04:00:00.000Z');
 const PRIVATE = 'PRIVATE_BODY_AND_CREDENTIAL_MARKER';
+const MODEL = 'example-provider/gpt-6.1-sol';
 const USAGE = { inputTokens: 100, outputTokens: 20, totalTokens: 120 };
 const timerContexts = new WeakSet();
 
@@ -290,8 +291,8 @@ test('full desktop snapshots project only metadata and use thread totals without
   const s = setup(t);
   s.ready(THREAD); s.owner();
   s.snapshot(1, {
-    title: PRIVATE, input: PRIVATE, items: [{ text: PRIVATE }], turns: [], latestModel: PRIVATE,
-    latestThreadSettings: { model: PRIVATE },
+    title: PRIVATE, input: PRIVATE, items: [{ text: PRIVATE }], turns: [], latestModel: MODEL,
+    latestReasoningEffort: 'ultra', latestThreadSettings: { model: PRIVATE },
     turnHistory: { kind: 'canonical', history: {
       entitiesByKey: { key: { turnId: OTHER, status: 'inProgress', params: { input: PRIVATE }, items: [{ text: PRIVATE }] } },
       islands: [{ entries: [{ value: 'key' }] }],
@@ -301,7 +302,7 @@ test('full desktop snapshots project only metadata and use thread totals without
   });
   assert.deepEqual(s.conversations, [{
     type: 'conversation', threadId: THREAD, primary: true, state: 'active', usage: USAGE,
-    observedAt: new Date(NOW).toISOString(),
+    model: MODEL, reasoningEffort: 'ultra', observedAt: new Date(NOW).toISOString(),
   }]);
   assert.equal(JSON.stringify({ events: s.events, statuses: s.statuses, outgoing: s.peer.messages }).includes(PRIVATE), false);
 });

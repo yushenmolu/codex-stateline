@@ -172,6 +172,21 @@ test('desktop conversation counters need no fabricated turn identity and null us
   assert.equal(s.live.snapshot({ taskId: THREAD }).usage.totalTokens, 120);
 });
 
+test('the runtime model survives a turn start and unvalidated values never fill the slot', () => {
+  const s = setup(); s.connect();
+  s.emit({ type: 'conversation', threadId: THREAD, primary: true, state: 'active', usage: USAGE, model: 'example-provider/gpt-6.1-sol', reasoningEffort: 'ultra' });
+  assert.equal(s.live.snapshot().model, 'example-provider/gpt-6.1-sol');
+  assert.equal(s.live.snapshot().reasoningEffort, 'ultra');
+  s.emit({ type: 'turn_started', threadId: THREAD, turnId: TURN, startedAt: new Date(NOW).toISOString() });
+  assert.equal(s.live.snapshot().model, 'example-provider/gpt-6.1-sol');
+  assert.equal(s.live.snapshot().reasoningEffort, 'ultra');
+  s.emit({ type: 'conversation', threadId: THREAD, primary: true, state: 'active', usage: USAGE, model: 'configured', reasoningEffort: 'turbo' });
+  assert.equal(s.live.snapshot().model, null);
+  assert.equal(s.live.snapshot().reasoningEffort, null);
+  s.emit({ type: 'conversation', threadId: THREAD, primary: true, state: 'active', usage: USAGE });
+  assert.equal(s.live.snapshot().model, null);
+});
+
 test('unverified ancestry cannot silently become the unique active primary', () => {
   const s = setup(); s.connect();
   s.emit({ type: 'conversation', threadId: THREAD, primary: null, state: 'active', usage: USAGE });

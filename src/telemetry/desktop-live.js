@@ -1,5 +1,6 @@
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
+import { validEffort, validModel } from './usage.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PIPE = '\\\\.\\pipe\\codex-ipc';
@@ -8,7 +9,7 @@ const object = (value) => value && typeof value === 'object' && !Array.isArray(v
 const count = (value) => Number.isSafeInteger(value) && value >= 0;
 const safePath = (value) => (typeof value === 'string' && value.length <= 256 && !['__proto__', 'prototype', 'constructor'].includes(value))
   || (Number.isSafeInteger(value) && value >= 0 && value <= 100_000);
-const FIELDS = new Set(['latestTokenUsageInfo', 'threadRuntimeStatus', 'source', 'threadSource', 'parentThreadId', 'ephemeral', 'sideConversation']);
+const FIELDS = new Set(['latestTokenUsageInfo', 'latestModel', 'latestReasoningEffort', 'threadRuntimeStatus', 'source', 'threadSource', 'parentThreadId', 'ephemeral', 'sideConversation']);
 
 function tokens(value) {
   if (!object(value) || !['inputTokens', 'outputTokens', 'totalTokens'].every((key) => count(value[key]))
@@ -29,6 +30,8 @@ function field(key, value) {
   }
   if (key === 'parentThreadId') return UUID.test(value ?? '') ? value : null;
   if (key === 'threadSource') return value === 'ambient_suggestions' ? value : null;
+  if (key === 'latestModel') return validModel(value) ? value : null;
+  if (key === 'latestReasoningEffort') return validEffort(value) ? value : null;
   return typeof value === 'boolean' ? value : null;
 }
 
@@ -128,7 +131,8 @@ export function createDesktopLiveConnector({
       if (!['active', 'idle', 'systemError'].includes(runtime)) { observe({ type: 'removed', threadId: entry.id }); return; }
       observe({ type: 'conversation', threadId: entry.id, primary: primary(value),
         state: runtime === 'active' ? 'active' : runtime === 'systemError' ? 'failed' : 'idle',
-        usage: tokens(value.latestTokenUsageInfo?.total), observedAt: new Date(wallClock()).toISOString() });
+        usage: tokens(value.latestTokenUsageInfo?.total), model: value.latestModel ?? null,
+        reasoningEffort: value.latestReasoningEffort ?? null, observedAt: new Date(wallClock()).toISOString() });
     }
     function resync(entry) {
       ready = false;
