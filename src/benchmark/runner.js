@@ -278,7 +278,7 @@ export function createRunner({ executable = resolveExecutable(), spawnImpl = spa
         if (signal?.aborted) throw failWith('cancelled');
         const args = ['exec', '--json', '--ephemeral', '--skip-git-repo-check', '--sandbox', 'read-only',
           '--disable', 'shell_tool', '--disable', 'multi_agent', '--disable', 'apps', '--disable', 'plugins',
-          '-c', 'mcp_servers.comsol_gui.enabled=false', '-c', 'mcp_servers.node_repl.enabled=false',
+          '-c', 'mcp_servers={}',
           '-c', 'web_search="disabled"', '-c', 'developer_instructions=' + JSON.stringify(GENERATION_INSTRUCTIONS)];
         if (model !== 'configured') args.push('--model', resolveBenchmarkModel(model));
         if (reasoningEffort !== 'configured') args.push('-c', 'model_reasoning_effort=' + reasoningEffort);

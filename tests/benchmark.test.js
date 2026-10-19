@@ -747,7 +747,7 @@ test('acceptance runner invocation constrains document generation through local 
   assert.deepEqual(argv, [
     'exec', '--json', '--ephemeral', '--skip-git-repo-check', '--sandbox', 'read-only',
     '--disable', 'shell_tool', '--disable', 'multi_agent', '--disable', 'apps', '--disable', 'plugins',
-    '-c', 'mcp_servers.comsol_gui.enabled=false', '-c', 'mcp_servers.node_repl.enabled=false',
+    '-c', 'mcp_servers={}',
     '-c', 'web_search="disabled"', '-c', instructionConfigs[0], '-'
   ]);
   assert.equal(input, COCKPIT_PROMPT, 'the original registered Chinese prompt is not prefixed or rewritten');
