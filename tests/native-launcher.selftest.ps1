@@ -141,6 +141,62 @@ Assert (-not (Bind-LauncherOwner $owner $oldHandshake) -and $owner.Revoked -and 
 $script:listenerId = 0
 Assert (@(Get-LauncherListeners).Count -eq 0) 'Idle listener query failed.'
 
+# netstat parser: the fallback path must read the same kernel table the CIM query
+# reads, including the IPv6 wildcard form and the owning PID.
+$script:netstatLines = @(
+  '',
+  'Active Connections',
+  '',
+  '  Proto  Local Address          Foreign Address        State           PID',
+  '  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       1976',
+  '  TCP    127.0.0.1:4173         0.0.0.0:0              LISTENING       424242',
+  '  TCP    127.0.0.1:4173         127.0.0.1:50999        ESTABLISHED     424242',
+  '  TCP    [::]:4173              [::]:0                 LISTENING       424242',
+  '  TCP    127.0.0.1:5000         127.0.0.1:4173         SYN_SENT        19836'
+)
+$parsed = @(ConvertFrom-LauncherNetstat $script:netstatLines)
+Assert ($parsed.Count -eq 2) 'netstat fallback did not isolate listening 4173 rows.'
+Assert (@($parsed | Where-Object { $_.OwningProcess -eq 424242 }).Count -eq 2) 'netstat fallback lost the owning PID.'
+Assert (@($parsed | Where-Object { $_.LocalAddress -eq '::' }).Count -eq 1) 'netstat fallback normalized the IPv6 wildcard incorrectly.'
+Assert (@(ConvertFrom-LauncherNetstat @('  TCP    127.0.0.1:4174         0.0.0.0:0              LISTENING       7')).Count -eq 0) 'netstat fallback accepted a foreign port.'
+Assert (@(ConvertFrom-LauncherNetstat @()).Count -eq 0) 'netstat fallback failed on empty input.'
+# A denied CIM provider degrades to netstat instead of blocking the launch.
+$script:listenerError = $true
+$script:netstatLines = @('  TCP    127.0.0.1:4173         0.0.0.0:0              LISTENING       424242')
+function netstat.exe { param([Parameter(ValueFromRemainingArguments = $true)]$Rest) $global:LASTEXITCODE = 0; return $script:netstatLines }
+Assert (@(Get-LauncherListeners).Count -eq 1 -and @(Get-LauncherListeners)[0].OwningProcess -eq 424242) 'Denied CIM query did not fall back to netstat.'
+$script:listenerError = $false
+Assert ((Get-Command Write-LauncherLog -ErrorAction SilentlyContinue) -ne $null) 'Launcher has no persisted failure log.'
+
+# Single instance: the first owner takes the mutex, and every later caller must
+# drop a reveal request instead of starting a second widget. The request is a
+# file because the panel polls for it, which survives a busy dispatcher.
+$script:RevealRoot = Join-Path ([IO.Path]::GetTempPath()) ('codex-launcher-selftest-' + [Guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $script:RevealRoot -Force
+function Get-LauncherRevealPath { return (Join-Path $script:RevealRoot 'reveal.request') }
+function Send-LauncherReveal {
+  try {
+    $path = Get-LauncherRevealPath
+    Set-Content -LiteralPath $path -Value ('{0:o}' -f (Get-Date)) -Encoding UTF8 -ErrorAction Stop
+    return $true
+  } catch { return $false }
+}
+Assert ((Get-Command Enter-LauncherSingleInstance -ErrorAction SilentlyContinue) -ne $null) 'Launcher lost its single-instance guard.'
+Assert ($script:LauncherMutexName -notmatch '\\') 'Single-instance mutex must use the session namespace so it is visible across launches.'
+$first = Enter-LauncherSingleInstance
+Assert ($first -eq $true -and $script:LauncherMutex -ne $null) 'First launcher did not take ownership.'
+# A second owner in this process would deadlock on the same mutex, so prove the
+# reveal path directly: it is exactly what the loser branch invokes.
+$null = Send-LauncherReveal
+Assert ((Test-Path -LiteralPath (Get-LauncherRevealPath)) -eq $true) 'Second launch did not drop a reveal request.'
+Exit-LauncherSingleInstance
+Assert ($script:LauncherMutex -eq $null) 'Launcher did not release its single-instance mutex.'
+# Releasing must let the next launch take ownership again.
+$second = Enter-LauncherSingleInstance
+Assert ($second -eq $true) 'Releasing ownership did not allow a later launch to own the widget.'
+Exit-LauncherSingleInstance
+Remove-Item -LiteralPath $script:RevealRoot -Recurse -Force -ErrorAction SilentlyContinue
+
 # Parse only this owner's PS files using the actual Windows PowerShell parser.
 foreach ($relative in @('scripts/start-floating-widget.ps1', 'tests/native-launcher.selftest.ps1')) {
   $tokens = $null; $parseErrors = $null

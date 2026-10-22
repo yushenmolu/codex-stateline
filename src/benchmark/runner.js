@@ -5,26 +5,102 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { isRegisteredCase } from './cases.js';
+import { validModel, validEffort, EFFORT_VALUES } from '../telemetry/usage.js';
 
-export const APPROVED_MODELS = new Set(['configured', 'example-provider/gpt-6-astra', 'example-provider/gpt-6.1-sol', 'example-provider/deepseek-v4.1-flash', 'gpt-6-astra', 'gpt-6.1-sol']);
+export const MODEL_SENTINEL = 'configured';
 export const SAFE_PROGRESS_EVENTS = new Set(['thread.started', 'turn.started', 'item.started', 'item.updated', 'item.completed', 'turn.completed', 'turn.failed', 'error']);
 export const DEFAULT_TIMEOUT_MS = 900000;
 export const MIN_TIMEOUT_MS = 60000;
 export const MAX_TIMEOUT_MS = 900000;
 export const TIMEOUT_ENV_KEY = 'CODEX_STATELINE_PELICAN_TIMEOUT_MS';
+// Legacy short names the desktop panel used before the catalog became the
+// source of truth. They only map to a canonical slug; they never widen what
+// the current configuration allows.
+const LEGACY_MODEL_ALIASES = new Map([['gpt-6-astra', 'example-provider/gpt-6-astra'], ['gpt-6.1-sol', 'example-provider/gpt-6.1-sol']]);
+// Static fallback, used only while the catalog is unavailable, so a missing or
+// unreadable catalog cannot lock the panel out of the models Codex still runs.
+export const APPROVED_MODELS = new Set([MODEL_SENTINEL, 'example-provider/gpt-6-astra', 'example-provider/gpt-6.1-sol', 'example-provider/deepseek-v4.1-flash', 'gpt-6-astra', 'gpt-6.1-sol']);
+export const EFFORTS = new Set([MODEL_SENTINEL, ...Array.from(EFFORT_VALUES)]);
 export function resolveBenchmarkModel(model) {
-  if (!APPROVED_MODELS.has(model)) return null;
-  return model === 'gpt-6-astra' || model === 'gpt-6.1-sol' ? 'example-provider/' + model : model;
+  if (typeof model !== 'string') return null;
+  if (model === MODEL_SENTINEL) return MODEL_SENTINEL;
+  if (!validModel(model)) return null;
+  const canonical = LEGACY_MODEL_ALIASES.get(model) ?? model;
+  // Without a catalog policy the static fallback still bounds what can run.
+  return APPROVED_MODELS.has(model) || APPROVED_MODELS.has(canonical) ? canonical : null;
 }
-const EFFORTS = new Set(['configured', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
-const MAX_STDOUT = 256 * 1024;
-const MAX_STDERR = 64 * 1024;
+// The CLI argument for an already-policy-checked model. Catalog slugs outside
+// the static fallback must still reach the CLI verbatim: passing null would be
+// stringified to "--model null", silently running a different model than the
+// one the run records.
+export function benchmarkModelArgument(model) {
+  return canonicalModel(model);
+}
+// Identifier-shaped models resolve to their canonical slug even when they are
+// not yet in the static set; catalog membership decides their policy fate.
+function canonicalModel(model) {
+  if (model === MODEL_SENTINEL) return MODEL_SENTINEL;
+  if (typeof model !== 'string' || !validModel(model)) return null;
+  return LEGACY_MODEL_ALIASES.get(model) ?? model;
+}
+// The credential policy may arrive as the payload shape ({slug} / {value}) or
+// as bare wire strings; anything else is ignored instead of trusted.
+function policyValues(policy, key) {
+  if (policy === null || policy === undefined) return null;
+  const values = policy instanceof Set ? [...policy] : Array.isArray(policy) ? policy : [];
+  const out = new Set();
+  for (const item of values) {
+    const value = typeof item === 'string' ? item : item && typeof item === 'object' ? item[key] : null;
+    if (typeof value === 'string') out.add(value);
+  }
+  return out;
+}
+// The request policy is the configured catalog, not a static allowlist. A
+// null/undefined policy keeps only the identifier guard; without any discovered
+// catalog slug the historical static set still applies.
+export function modelAllowlist(availableModels = null) {
+  const values = policyValues(availableModels, 'slug');
+  if (values === null) return null;
+  const allowed = new Set([MODEL_SENTINEL]);
+  for (const slug of values) if (validModel(slug)) allowed.add(slug);
+  if (allowed.size === 1) for (const model of APPROVED_MODELS) allowed.add(model);
+  return allowed;
+}
+export function effortAllowlist(availableEfforts = null) {
+  const values = policyValues(availableEfforts, 'value');
+  if (values === null) return null;
+  const allowed = new Set([MODEL_SENTINEL]);
+  for (const effort of values) if (validEffort(effort)) allowed.add(effort);
+  if (allowed.size === 1) for (const effort of EFFORT_VALUES) allowed.add(effort);
+  return allowed;
+}
+export function isAllowedModel(model, availableModels = null) {
+  const canonical = canonicalModel(model);
+  if (canonical === null) return false;
+  const allowed = modelAllowlist(availableModels);
+  if (allowed === null) return APPROVED_MODELS.has(model) || APPROVED_MODELS.has(canonical);
+  return allowed.has(model) || allowed.has(canonical);
+}
+export function isAllowedEffort(effort, availableEfforts = null) {
+  const allowed = effortAllowlist(availableEfforts);
+  if (allowed === null) return effort === MODEL_SENTINEL || validEffort(effort);
+  return allowed.has(effort);
+}
+// Three independent budgets. The answer is the only part that is kept, so it
+// gets the strict limit. Reasoning summaries are re-emitted in full on every
+// item.completed, so a reasoning-heavy run legitimately streams far more than
+// the answer it produces; the stream and line caps only guard against a
+// runaway process, never against a large document.
+export const MAX_ANSWER = 256 * 1024;
+export const MAX_LINE = 2 * 1024 * 1024;
+export const MAX_STREAM = 16 * 1024 * 1024;
+export const MAX_STDERR = 64 * 1024;
 export const DIAGNOSTIC_KEYS = Object.freeze(['startedAt', 'finishedAt', 'timeoutMs', 'elapsedMs', 'firstEventElapsedMs', 'lastEventElapsedMs', 'lastPhase', 'terminationReason', 'cleanupStatus', 'configWarning', 'errorEventCount', 'turnFailedEventCount', 'firstErrorElapsedMs', 'lastErrorElapsedMs', 'lastErrorClass', 'exitCode', 'stderrBytes']);
 const LAST_PHASES = new Set(['queued', 'starting', 'waiting', 'generating', 'stopping', 'unknown']);
 const TERMINATION_REASONS = new Set(['completed', 'budget_exhausted', 'cancelled', 'process_error', 'invalid_output']);
 const CLEANUP_STATUSES = new Set(['confirmed', 'unconfirmed', 'not_needed']);
 const CONFIG_WARNINGS = new Set(['timeout_config_invalid']);
-const LAST_ERROR_CLASSES = new Set(['reconnect_notice', 'authentication_notice', 'rate_limit_notice', 'model_notice', 'other']);
+const LAST_ERROR_CLASSES = new Set(['reconnect_notice', 'upstream_notice', 'authentication_notice', 'rate_limit_notice', 'model_notice', 'other']);
 const GENERATION_INSTRUCTIONS = 'This is self-contained document generation. Follow the original user prompt directly and return the requested document. Do not perform repository engineering workflows or use commands, MCP tools, subagents, or file operations. Preserve all applicable safety and authorization rules.';
 
 function unique(values) {
@@ -95,18 +171,40 @@ export function resolveTimeoutMs({ explicit, env = process.env } = {}) {
   return { timeoutMs: value, configWarning: null };
 }
 
-// Inspect only explicit fields on CLI failure events; never infer from message/stderr.
+// The only place the CLI's own text is read. Two phrasings are recognised, in
+// this order: the retry notice the CLI emits while it is still working ("... n/m"),
+// and the bare stream loss it emits once those retries are exhausted. The first
+// five notices of a failing provider run contain both phrases, so the retry
+// wording must win or a run that is still retrying would be killed.
+const RETRYING_MESSAGE = /reconnect|retrying/i;
+const STREAM_LOST_MESSAGE = /stream disconnected before completion|connection lost mid-reply/i;
+
+function messageOf(event) {
+  const details = event.error && typeof event.error === 'object' ? event.error : event;
+  return typeof event.message === 'string' ? event.message
+    : typeof event.error === 'string' ? event.error
+    : typeof details.message === 'string' ? details.message : '';
+}
+
+// Structured fields first, then that retry/stream-loss wording. The local process
+// is never blamed for a provider that dropped the stream, because that wording
+// sends people to fix a machine that is working.
 function failureCode(event) {
   const details = event.error && typeof event.error === 'object' ? event.error : event;
   const status = details.status ?? details.status_code ?? details.http_status_code;
   if (status === 401) return 'authentication_failed';
   if (status === 429) return 'rate_limited';
   if (['model_not_found', 'model_not_available'].includes(details.code)) return 'model_unavailable';
+  // Shares errorClassFor so classification and diagnostics can never disagree.
+  if (errorClassFor(event) === 'upstream_notice') return 'upstream_stream_lost';
   return 'process_failed';
 }
 
-// Diagnostics-only coarse class: structured fields first, then the CLI reconnect notice text.
-// It never feeds failureCode, so classification can never widen what counts as a failure.
+// Diagnostics-only coarse class: structured fields first, then the CLI's own
+// wording. It decides recoverability too: the CLI reports a transient reconnect as
+// an `error` event and then keeps streaming, so killing the child on it loses a
+// finished artwork. The retry wording is tested first because those notices carry
+// the stream-loss phrase as well, and only the retry wording means "still working".
 function errorClassFor(event) {
   const details = event.error && typeof event.error === 'object' ? event.error : event;
   const status = details.status ?? details.status_code ?? details.http_status_code;
@@ -114,38 +212,20 @@ function errorClassFor(event) {
   if (status === 429 || details.code === 'rate_limited') return 'rate_limit_notice';
   if (details.code === 'authentication_failed') return 'authentication_notice';
   if (['model_not_found', 'model_not_available'].includes(details.code)) return 'model_notice';
-  const message = typeof event.message === 'string' ? event.message
-    : typeof event.error === 'string' ? event.error
-    : typeof details.message === 'string' ? details.message : '';
-  return /reconnect|retrying/i.test(message) ? 'reconnect_notice' : 'other';
+  const message = messageOf(event);
+  if (RETRYING_MESSAGE.test(message)) return 'reconnect_notice';
+  if (STREAM_LOST_MESSAGE.test(message)) return 'upstream_notice';
+  return 'other';
 }
 
-function parseOutput(text, processFailed = false) {
-  let final = null;
-  let completed = false;
-  let malformed = false;
-  let failure = null;
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    let event;
-    try { event = JSON.parse(line); } catch { malformed = true; continue; }
-    if (!event || typeof event !== 'object' || Array.isArray(event)) { malformed = true; continue; }
-    if (event.type === 'error' || event.type === 'turn.failed') { failure ??= failureCode(event); continue; }
-    if (event.type === 'item.completed' && event.item?.type === 'agent_message' && typeof event.item.text === 'string') {
-      if (Buffer.byteLength(event.item.text) > MAX_STDOUT) throw Object.assign(new Error('answer_too_large'), { code: 'answer_too_large' });
-      final = event.item.text;
-    }
-    if (event.type === 'turn.completed' && (event.status === undefined || event.status === 'completed')) completed = true;
-  }
-  if (failure || processFailed || malformed) {
-    const code = failure ?? (processFailed ? 'process_failed' : 'malformed_output');
-    throw Object.assign(new Error(code), { code });
-  }
-  if (!final || !completed) throw Object.assign(new Error('incomplete_output'), { code: 'incomplete_output' });
-  return final;
+// A reconnect notice is the CLI saying it is retrying, not a terminal failure: the
+// same run can still finish and produce a complete answer. Only a structured error
+// or a turn.failed ends the run.
+function recoverableNotice(event) {
+  return event.type === 'error' && errorClassFor(event) === 'reconnect_notice';
 }
 
-export function createRunner({ executable = resolveExecutable(), spawnImpl = spawn, taskkillImpl, timeoutMs, terminationTimeoutMs = 5000, platform = process.platform, tempRoot = tmpdir(), env = process.env, wallClock = () => Date.now() } = {}) {
+export function createRunner({ executable = resolveExecutable(), spawnImpl = spawn, taskkillImpl, timeoutMs, terminationTimeoutMs = 5000, platform = process.platform, tempRoot = tmpdir(), env = process.env, wallClock = () => Date.now(), modelPolicy, effortPolicy } = {}) {
   const resolved = resolveTimeoutMs({ explicit: timeoutMs, env });
   const budgetMs = resolved.timeoutMs;
   const configWarning = resolved.configWarning;
@@ -202,7 +282,10 @@ export function createRunner({ executable = resolveExecutable(), spawnImpl = spa
         if (cleanupState !== undefined) error.cleanupState = cleanupState;
         return error;
       };
-      if (!APPROVED_MODELS.has(model) || !EFFORTS.has(reasoningEffort) || !isRegisteredCase(caseDef)) {
+      let models, efforts;
+      try { models = typeof modelPolicy === 'function' ? modelPolicy() : modelPolicy; } catch { models = []; }
+      try { efforts = typeof effortPolicy === 'function' ? effortPolicy() : effortPolicy; } catch { efforts = []; }
+      if (!isAllowedModel(model, models) || !isAllowedEffort(reasoningEffort, efforts) || !isRegisteredCase(caseDef)) {
         const error = failWith('invalid_config');
         error.diagnostics = finish('invalid_config');
         throw error;
@@ -210,7 +293,10 @@ export function createRunner({ executable = resolveExecutable(), spawnImpl = spa
       const cwd = await mkdtemp(join(tempRoot, 'codex-companion-'));
       const stopped = new Promise((resolve) => { resolveStopped = resolve; });
       const decoder = new StringDecoder('utf8');
-      let out = ''; let outputBytes = 0; let stderrBytes = 0; let progressRemainder = '';
+      // The stream is parsed line by line as it arrives. Only the final answer is
+      // retained, so a long reasoning summary cannot inflate the answer budget.
+      let answer = null; let turnCompleted = false; let malformed = false; let sawFailure = null;
+      let streamBytes = 0; let stderrBytes = 0; let remainder = '';
       let lastEvent = null; let outputStarted = false;
       const publish = (stage, type = null) => {
         const at = new Date(wallClock()).toISOString();
@@ -222,22 +308,57 @@ export function createRunner({ executable = resolveExecutable(), spawnImpl = spa
       const observeLine = (line) => {
         if (!line.trim()) return;
         let event;
-        try { event = JSON.parse(line); } catch { return; }
-        if (!event || typeof event !== 'object' || Array.isArray(event) || !SAFE_PROGRESS_EVENTS.has(event.type)) return;
-        const failed = event.type === 'error' || event.type === 'turn.failed';
+        try { event = JSON.parse(line); } catch { malformed = true; return; }
+        if (!event || typeof event !== 'object' || Array.isArray(event)) { malformed = true; return; }
+        // Answer extraction is independent from the safe-progress allowlist: a
+        // registered case may only be scored from a complete agent_message.
+        if (event.type === 'item.completed' && event.item?.type === 'agent_message' && typeof event.item.text === 'string') {
+          if (Buffer.byteLength(event.item.text) > MAX_ANSWER) { void stop('answer_too_large'); return; }
+          answer = event.item.text;
+        }
+        if (event.type === 'turn.completed' && (event.status === undefined || event.status === 'completed')) turnCompleted = true;
+        // A transient reconnect notice is recoverable; killing the child here would
+        // discard a run that the CLI is still retrying. Every other error event and
+        // every turn.failed stays terminal.
+        const notice = recoverableNotice(event);
+        if (!notice && (event.type === 'error' || event.type === 'turn.failed')) {
+          sawFailure ??= failureCode(event);
+          void stop(sawFailure);
+        }
+        if (!SAFE_PROGRESS_EVENTS.has(event.type)) return;
+        const failed = !notice && (event.type === 'error' || event.type === 'turn.failed');
         if (event.type.startsWith('item.') && (event.item?.type === 'reasoning' || event.item?.type === 'agent_message')) outputStarted = true;
         const elapsed = Math.max(0, wallClock() - startedMs);
         diagnostics.firstEventElapsedMs ??= elapsed;
         diagnostics.lastEventElapsedMs = elapsed;
-        if (failed) {
+        if (event.type === 'error' || event.type === 'turn.failed') {
           if (event.type === 'error') diagnostics.errorEventCount += 1;
           else diagnostics.turnFailedEventCount += 1;
           diagnostics.firstErrorElapsedMs ??= elapsed;
           diagnostics.lastErrorElapsedMs = elapsed;
           diagnostics.lastErrorClass = errorClassFor(event);
+          // 零输出加上两次以上报错，是「上游已经死了」的确定特征：中转挂死的运行到预算
+          // 耗尽都不会产出任何 item.*，而真正在推进的运行在首次报错前就已经有输出了。
+          // 判据取「有没有产出过输出」而不是「静默了多久」——静默时长的可行阈值窗口只有
+          // 288–332s（余量 4%），会误杀合法的长思考；同理只报一次错就掐同样有误杀风险。
+          if (!outputStarted && diagnostics.errorEventCount >= 2) void stop('upstream_stalled');
         }
         publish(failed ? 'stopping' : outputStarted ? 'generating' : 'waiting', event.type);
-        if (failed) void stop(failureCode(event));
+      };
+      const consumeLine = (line) => {
+        const bytes = Buffer.byteLength(line, 'utf8');
+        if (bytes > MAX_LINE) { void stop('output_too_large'); return; }
+        observeLine(line);
+      };
+      // Turn EOF/decoder output into complete lines; a trailing partial line is
+      // flushed by finish() so a final event without a newline is still counted.
+      const consumeChunk = (text) => {
+        remainder += text;
+        let end;
+        while ((end = remainder.indexOf('\n')) >= 0) {
+          consumeLine(remainder.slice(0, end));
+          remainder = remainder.slice(end + 1);
+        }
       };
       const stop = (code) => {
         failure ??= code;
@@ -280,7 +401,11 @@ export function createRunner({ executable = resolveExecutable(), spawnImpl = spa
           '--disable', 'shell_tool', '--disable', 'multi_agent', '--disable', 'apps', '--disable', 'plugins',
           '-c', 'mcp_servers={}',
           '-c', 'web_search="disabled"', '-c', 'developer_instructions=' + JSON.stringify(GENERATION_INSTRUCTIONS)];
-        if (model !== 'configured') args.push('--model', resolveBenchmarkModel(model));
+        if (model !== 'configured') {
+          const argvModel = benchmarkModelArgument(model);
+          if (argvModel === null) throw failWith('invalid_config');
+          args.push('--model', argvModel);
+        }
         if (reasoningEffort !== 'configured') args.push('-c', 'model_reasoning_effort=' + reasoningEffort);
         args.push('-');
         publish('starting');
@@ -299,16 +424,9 @@ export function createRunner({ executable = resolveExecutable(), spawnImpl = spa
           });
         });
         child.stdout?.on('data', (chunk) => {
-          outputBytes += Buffer.byteLength(chunk);
-          if (outputBytes > MAX_STDOUT) { void stop('output_too_large'); return; }
-          const decoded = decoder.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-          out += decoded;
-          progressRemainder += decoded;
-          let end;
-          while ((end = progressRemainder.indexOf('\n')) >= 0) {
-            observeLine(progressRemainder.slice(0, end));
-            progressRemainder = progressRemainder.slice(end + 1);
-          }
+          streamBytes += Buffer.byteLength(chunk);
+          if (streamBytes > MAX_STREAM) { void stop('output_too_large'); return; }
+          consumeChunk(decoder.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
         });
         child.stderr?.on('data', (chunk) => {
           stderrBytes += Buffer.byteLength(chunk);
@@ -329,12 +447,16 @@ export function createRunner({ executable = resolveExecutable(), spawnImpl = spa
           message: 'termination_unconfirmed; temporary_directory_retained', reason: failure,
           cleanupState: 'temporary_directory_retained_process_exit_unconfirmed'
         });
-        const decoderTail = decoder.end();
-        out += decoderTail;
-        observeLine(progressRemainder + decoderTail);
+        // Flush the decoder and any final line that arrived without a newline.
+        consumeChunk(decoder.end());
+        if (remainder.trim()) consumeLine(remainder);
+        remainder = '';
         if (failure) throw failWith(failure, { reason: failure });
         if (exit.signalName) throw failWith('process_failed');
-        outcome = { value: { answer: parseOutput(out, exit.code !== 0), stderrTruncated: stderrBytes >= MAX_STDERR } };
+        const processFailed = exit.code !== 0;
+        if (sawFailure || processFailed || malformed) throw failWith(sawFailure ?? (processFailed ? 'process_failed' : 'malformed_output'));
+        if (!answer || !turnCompleted) throw failWith('incomplete_output');
+        outcome = { value: { answer, stderrTruncated: stderrBytes >= MAX_STDERR } };
       } catch (error) {
         outcome = { error: error?.code ? error : failWith('spawn_failed') };
       } finally {

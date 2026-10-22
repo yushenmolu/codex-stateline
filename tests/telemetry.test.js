@@ -61,7 +61,7 @@ function tokenLine(usage, timestamp = iso, extra = {}) {
 
 async function tempDirectory(t, prefix = 'codex-telemetry-') {
   const dir = await mkdtemp(join(tmpdir(), prefix));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   return dir;
 }
 
@@ -1337,7 +1337,45 @@ test('W1 synthetic config reads enforce byte cap, UTF8 and links', async (t) => 
   assert.equal((await readConfigDefaults({ codexHome: dir })).model.reason, 'syntax_unsupported');
   const root = await tempDirectory(t);
   await symlink(dir, join(root, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
-  assert.equal((await readConfigDefaults({ codexHome: join(root, 'linked') })).model.reason, 'file_unsafe');
+  try {
+    assert.equal((await readConfigDefaults({ codexHome: join(root, 'linked') })).model.reason, 'file_unsafe');
+  } finally {
+    await rm(join(root, 'linked'), { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test('W1 catalog slugs and enabled efforts build the selector payload', async (t) => {
+  const dir = await tempDirectory(t);
+  await writeFile(join(dir, 'magpie-models.json'), JSON.stringify({ models: [
+    { slug: 'example-provider/second', display_name: 'Second', priority: 2, base_instructions: 'SENTINEL' },
+    { slug: 'example-provider/first', display_name: 'First', priority: 1 },
+    { slug: 'bad//slug', display_name: 'Broken', priority: 0 },
+    { slug: 'example-provider/no-name', priority: 0 },
+    { slug: 'example-provider/control', display_name: 'Bad\u0001Name', priority: 0 },
+  ] }));
+  await writeFile(join(dir, 'config.toml'), 'model = "example-provider/first"\nmodel_catalog_json = "magpie-models.json"\n[desktop]\nenabled-reasoning-efforts = ["low", "ultra", "persistent", "none"]\n');
+  const result = await readConfigDefaults({ codexHome: dir });
+  assert.deepEqual(result.availableModels.map((item) => item.slug), ['configured', 'example-provider/first', 'example-provider/second']);
+  assert.deepEqual(result.availableModels[0], { slug: 'configured', displayName: '当前配置' });
+  assert.deepEqual(result.availableModels[1], { slug: 'example-provider/first', displayName: 'First' });
+  assert.equal(JSON.stringify(result).includes('SENTINEL'), false);
+  assert.deepEqual(result.availableEfforts[0], { value: 'configured', label: '当前配置' });
+  assert.deepEqual(result.availableEfforts.map((item) => item.value), ['configured', 'low', 'ultra', 'persistent', 'none']);
+  assert.deepEqual(result.availableEfforts.slice(1).map((item) => item.label), ['low', 'ultra', 'persistent', 'none']);
+});
+
+test('W1 selector payload keeps the configured sentinel when the catalog is unusable', async (t) => {
+  const dir = await tempDirectory(t);
+  await writeFile(join(dir, 'config.toml'), 'model = "example-provider/absent"\nmodel_catalog_json = "missing.json"\n');
+  const missing = await readConfigDefaults({ codexHome: dir });
+  assert.deepEqual(missing.availableModels, [{ slug: 'configured', displayName: '当前配置' }]);
+  assert.deepEqual(missing.availableEfforts.map((item) => item.value), ['configured', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'persistent', 'none']);
+  await writeFile(join(dir, 'missing.json'), '{not json');
+  assert.deepEqual((await readConfigDefaults({ codexHome: dir })).availableModels.map((item) => item.slug), ['configured']);
+  await writeFile(join(dir, 'missing.json'), Buffer.alloc(262145, 32));
+  const oversized = await readConfigDefaults({ codexHome: dir });
+  assert.deepEqual(oversized.availableModels.map((item) => item.slug), ['configured']);
+  assert.equal(oversized.model.value, 'example-provider/absent');
 });
 
 test('W1 default cache rate limits and expires, worker coalesces refreshes', async () => {

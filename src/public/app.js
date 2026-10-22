@@ -16,10 +16,13 @@ const state = { nonce:null, requestId:null, displayed:null, benchmarkKey:null, d
 const format = v => Number.isFinite(v) ? new Intl.NumberFormat('zh-CN', { maximumFractionDigits:1 }).format(v) : '—';
 const errors = { nonce_invalid:'验证已过期，请重试。', run_active:'已有基准运行，请稍后重试。', benchmark_busy:'已有基准运行，请稍后重试。', request_conflict:'请求冲突，请刷新后重试。', score_invalid:'评分无效，请检查题目版本与分数。', schema_invalid:'请求无效，请刷新后重试。', run_not_found:'运行不存在，请刷新后重试。', service_unavailable:'本地服务不可用，请检查服务。', benchmark_unavailable:'基准不可用，请检查 Codex CLI。', baseline_invalid:'请先完成全部评分。', task_not_found:'固定任务不在当前列表，已保留选择。', query_invalid:'任务查询无效。', telemetry_unavailable:'任务遥测暂不可用。', tasks_unavailable:'任务列表暂不可用。' };
 function safeError(error) { return errors[error?.code] ?? '操作失败，请检查本地服务后重试。'; }
+// A failed case carries its own classified code; saying why beats a generic banner.
+const caseErrors = { upstream_stream_lost:'上游中转中断了生成流（已自动重试一次）。这不是本机环境问题，请稍后重试或换一个模型提供方。', process_failed:'Codex 进程执行失败，请检查本地运行环境。', timed_out:'运行超时，请稍后重试。', authentication_failed:'身份验证失败，请检查 Codex 登录状态或中转配置凭据。', rate_limited:'请求受到限流，请稍后重试。', upstream_stalled:'上游中转长时间没有任何输出（已自动重试一次）。这不是本机环境问题，请稍后重试或换一个模型提供方。', model_unavailable:'所选模型不可用，请检查模型配置。', malformed_output:'模型输出格式无效。', incomplete_output:'模型输出不完整。', answer_too_large:'回答超过大小限制。', output_too_large:'进程输出超过大小限制。', invalid_config:'模型或推理配置无效。' };
+function caseErrorText(code) { return caseErrors[code] ?? ''; }
 function message(text, error=false) { $('benchmark-message').textContent=text; $('benchmark-message').className='message'+(error?' error':''); }
 const safeCount = v => Number.isSafeInteger(v) && v >= 0;
 const validModel = v => typeof v === 'string' && v.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(v);
-const effortLabels = { low:'低', medium:'中', high:'高', xhigh:'更高', max:'最高', ultra:'极高' };
+const effortLabels = { low:'low', medium:'medium', high:'high', xhigh:'xhigh', max:'max', ultra:'ultra' };
 const available = (v,source) => v?.state === 'available' && v.source === source && v.reason === 'none';
 const utcTime = v => typeof v === 'string' && /(?:Z|\+00:00)$/.test(v) && Number.isFinite(Date.parse(v));
 function validTurn(turn) {
@@ -293,7 +296,8 @@ function safeAnimation(node) {
 }
 function renderCase(run,ca) {
   const article=element('article','case');const head=element('div','case-head');head.append(element('strong','',labels[ca.caseId]??'未知题目'),element('span','case-state',names[ca.status]??'待运行'));article.append(head);
-  if(ca.cleanupState==='temporary_directory_retained_process_exit_unconfirmed')article.append(element('p','message error','未确认进程已退出，临时文件已保留。'));const diagnostics=renderDiagnostics(ca.diagnostics);if(diagnostics)article.append(diagnostics);
+  if(ca.cleanupState==='temporary_directory_retained_process_exit_unconfirmed')article.append(element('p','message error','未确认进程已退出，临时文件已保留。'));
+  if(ca.errorCode){const explanation=caseErrorText(ca.errorCode);if(explanation)article.append(element('p','message error',explanation));}const diagnostics=renderDiagnostics(ca.diagnostics);if(diagnostics)article.append(diagnostics);
   if(ca.caseId==='pelican-cockpit'){
     article.append(element('p','prompt',cockpitPrompt),element('p','muted','题集 / 评分版本：'+run.caseSetVersion+' / '+run.rubricVersion));
     const sourceLink=element('a','','原始提示词来源：jlcodes99/cockpit-tools · b0d88627 ↗');sourceLink.href=cockpitSource;sourceLink.target='_blank';sourceLink.rel='noopener noreferrer';article.append(sourceLink);

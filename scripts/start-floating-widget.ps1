@@ -1,6 +1,45 @@
-# Windows PowerShell 5.1. Dot-sourcing loads functions without starting services.
+﻿# Windows PowerShell 5.1. Dot-sourcing loads functions without starting services.
 $ErrorActionPreference = 'Stop'
 $script:CompanionOrigin = 'http://127.0.0.1:4173'
+$script:LauncherMutexName = 'CodexCompanionFloatingWidget'
+$script:LauncherMutex = $null
+$script:SignalWidgetShowName = 'CodexCompanionFloatingWidgetShow'
+
+function Send-LauncherReveal {
+  # A reveal request is a file drop, not a window message: the running panel
+  # polls for it, so this works whether the panel is hidden, minimised, or on
+  # another desktop, and the request survives a briefly busy dispatcher.
+  try {
+    $dir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'codex-companion'
+    if (-not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
+    $path = Join-Path $dir 'reveal.request'
+    $stamp = ('{0:o}' -f (Get-Date))
+    Set-Content -LiteralPath $path -Value $stamp -Encoding UTF8 -ErrorAction Stop
+    return $true
+  } catch {
+    return $false
+  }
+}
+function Enter-LauncherSingleInstance {
+  # A second double-click must surface the running panel instead of stacking a
+  # duplicate window and a duplicate tray icon on top of it.
+  $created = $false
+  $mutex = New-Object Threading.Mutex($false, $script:LauncherMutexName, [ref]$created)
+  if ($created) {
+    $script:LauncherMutex = $mutex
+    return $true
+  }
+  $script:RevealSent = $false
+  try { $script:RevealSent = Send-LauncherReveal } catch { $script:RevealSent = $false }
+  $mutex.Dispose()
+  return $false
+}
+function Exit-LauncherSingleInstance {
+  if ($script:LauncherMutex -eq $null) { return }
+  try { $script:LauncherMutex.ReleaseMutex() } catch { }
+  try { $script:LauncherMutex.Dispose() } catch { }
+  $script:LauncherMutex = $null
+}
 
 function Invoke-LauncherHttp([string]$Path, [string]$Method = 'GET', [hashtable]$ExtraHeaders = @{}) {
   if ($Path -notin @('/api/capabilities', '/api/nonce', '/api/shutdown')) { throw 'Unsupported launcher endpoint.' }
@@ -59,10 +98,45 @@ function Test-LauncherCapabilities($Capabilities) {
   }
   return $true
 }
+function ConvertFrom-LauncherNetstat([string[]]$Lines) {
+  # Pure parser for `netstat -ano -p tcp`; the state token stays ASCII even on a localized Windows.
+  $found = @()
+  foreach ($line in $Lines) {
+    if ($line -notmatch '^\s*TCP\s+(\S+):(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$') { continue }
+    $address = $Matches[1]
+    $port = [int]$Matches[2]
+    if ($port -ne 4173) { continue }
+    if ($address -eq '[::]') { $address = '::' } elseif ($address -eq '[::1]') { $address = '::1' }
+    if ($address -notin @('127.0.0.1', '0.0.0.0', '::', '::1')) { continue }
+    $found += [pscustomobject]@{ LocalPort = $port; LocalAddress = $address; OwningProcess = [int]$Matches[3] }
+  }
+  return $found
+}
+function Get-LauncherNetstatListeners {
+  $lines = @(& netstat.exe -ano -p tcp 2>$null)
+  if ($LASTEXITCODE -ne 0) { throw 'netstat listener query failed.' }
+  return @(ConvertFrom-LauncherNetstat $lines)
+}
 function Get-LauncherListeners {
   # Query failure is an error, never evidence of an idle port. Include wildcard listeners.
-  return @(Get-NetTCPConnection -State Listen -ErrorAction Stop |
-    Where-Object { $_.LocalPort -eq 4173 -and $_.LocalAddress -in @('127.0.0.1', '0.0.0.0', '::', '::1') })
+  try {
+    return @(Get-NetTCPConnection -State Listen -ErrorAction Stop |
+      Where-Object { $_.LocalPort -eq 4173 -and $_.LocalAddress -in @('127.0.0.1', '0.0.0.0', '::', '::1') })
+  } catch {
+    # WMI/CIM is restricted on some hardened machines. netstat reads the same
+    # kernel table without it and still reports the owning PID, so an unusable
+    # CIM provider degrades the query instead of blocking every launch.
+    return @(Get-LauncherNetstatListeners)
+  }
+}
+function Write-LauncherLog([string]$Stage, [string]$Message) {
+  # Local diagnostics only: a failed launch must be inspectable after the dialog closes.
+  try {
+    $dir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'codex-companion'
+    if (-not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
+    $line = ('{0:o} [{1}] {2}' -f (Get-Date), $Stage, $Message)
+    Add-Content -LiteralPath (Join-Path $dir 'launcher.log') -Value $line -Encoding UTF8
+  } catch { }
 }
 function Test-LauncherProcess($Owner) {
   try {
@@ -157,7 +231,14 @@ function Start-NativeLauncher {
       throw 'Use Windows PowerShell 5.1 STA: powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File scripts/start-floating-widget.ps1'
     }
     if (-not (Test-Path -LiteralPath $nativePath -PathType Leaf)) { throw 'Native UI unavailable: scripts/native-widget.ps1. Complete the native UI installation before launching.' }
+    if (-not (Enter-LauncherSingleInstance)) {
+      # Another instance already owns the widget: it was asked to reveal itself.
+      Write-LauncherLog 'launch' 'already running; requested reveal'
+      return
+    }
+    Write-LauncherLog 'launch' 'start'
     $listeners = @(Get-LauncherListeners)
+    Write-LauncherLog 'launch' ('listeners=' + $listeners.Count)
     if ($listeners.Count -eq 0) {
       $node = Get-Command node.exe -ErrorAction Stop
       $bytes = New-Object byte[] 32
@@ -175,6 +256,7 @@ function Start-NativeLauncher {
         [Environment]::SetEnvironmentVariable('CODEX_COMPANION_SHUTDOWN_TOKEN', $previous, 'Process')
         $token = $null
       }
+      Write-LauncherLog 'launch' ('server pid=' + $owner.Process.Id)
       $ready = $false
       for ($attempt = 0; $attempt -lt 40; $attempt++) {
         if (-not (Test-LauncherProcess $owner)) { throw 'The owned local server exited during startup.' }
@@ -185,6 +267,7 @@ function Start-NativeLauncher {
         if ($ready) { break }
         Start-Sleep -Milliseconds 250
       }
+      Write-LauncherLog 'launch' ('ready=' + $ready)
       if (-not $ready -or -not (Bind-LauncherOwner $owner $capabilities)) {
         throw 'Native protocol v1 could not be bound to the owned listener. An old or unknown service may occupy port 4173. No foreign service will be stopped.'
       }
@@ -195,18 +278,24 @@ function Start-NativeLauncher {
       }
     }
     # Same PS5 STA process; UI owns windows only. Shutdown follows main-window close.
+    Write-LauncherLog 'launch' 'opening native widget'
     & $nativePath
+    Write-LauncherLog 'launch' 'native widget closed'
   } catch {
+    Write-LauncherLog 'error' ($_.Exception.GetType().Name + ': ' + $_.Exception.Message)
+    Write-LauncherLog 'error' ($_.ScriptStackTrace -replace "`r?`n", ' | ')
     Show-LauncherDiagnostic $_.Exception.Message
     throw
   } finally {
     if ($owner) {
       try {
         $cleanup = Stop-LauncherOwnedServer $owner
+        Write-LauncherLog 'cleanup' $cleanup
         if ($cleanup -notin @('exited', 'terminated')) { Write-Warning ('Server cleanup: ' + $cleanup + '. No unverified process was stopped.') }
       } catch { Write-Warning 'Server cleanup could not be confirmed; inspect the owned process manually.' }
       finally { $owner.Token = $null; $owner.Process.Dispose() }
     }
+    Exit-LauncherSingleInstance
   }
 }
 if ($MyInvocation.InvocationName -ne '.') { Start-NativeLauncher }

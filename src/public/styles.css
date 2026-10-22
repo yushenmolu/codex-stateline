@@ -1,10 +1,489 @@
-:root{color-scheme:dark;--bg:#18202a;--panel:#212c38;--line:#364554;--text:#edf3fa;--muted:#a8b7c8;--accent:#9bc8ff;--warn:#f1c77c;--danger:#ffaaa2}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:13px/1.45 'Segoe UI','Microsoft YaHei',sans-serif}.shell{max-width:540px;margin:auto;padding:12px}.topbar,.section-head{display:flex;align-items:center;justify-content:space-between;gap:10px}.topbar{margin-bottom:10px}h1,h2,p{margin:0}h1{font-size:19px;letter-spacing:.2px}h1 span{font-size:14px;font-weight:400;color:var(--muted)}h2{font-size:13px;font-weight:600}.connection,.state-badge{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}.dot{width:6px;height:6px;border-radius:50%;background:var(--muted)}.connection.ok .dot{background:var(--accent)}.connection.error .dot{background:var(--danger)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}.section-head{margin-bottom:8px}.metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:6px;overflow:hidden}.metric{background:var(--panel);padding:8px 12px;min-width:0}.metric span{display:block;color:var(--muted);font-size:11px}.metric strong{display:block;font:600 25px/1.25 Consolas,monospace;overflow-wrap:anywhere}.metric.accent strong{color:var(--accent)}summary{cursor:pointer;color:var(--muted)}summary:focus-visible,button:focus-visible,select:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.session-details{margin-top:8px;font-size:11px}.session-id{font-family:Consolas,monospace;overflow-wrap:anywhere}.benchmark{margin-top:8px}.benchmark>summary{display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--text);font-weight:600}.benchmark>summary>span:first-child:before{content:'▸';margin-right:7px;color:var(--accent)}.benchmark[open]>summary>span:first-child:before{content:'▾'}.muted,.message{color:var(--muted);font-size:12px;overflow-wrap:anywhere}.message{margin-top:8px}.message.error{color:var(--danger)}.message.warn{color:var(--warn)}.prompt{margin:12px 0 6px;font:12px/1.5 Consolas,monospace}a{color:var(--accent)}.controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:12px}label{display:grid;gap:4px;color:var(--muted);font-size:11px}select,button{min-width:0;width:100%;height:32px;border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--text);padding:0 8px;font:12px 'Segoe UI',sans-serif}button{cursor:pointer;font-weight:600}button:disabled{cursor:not-allowed;filter:saturate(.4) brightness(.75)}.primary{background:var(--accent);color:#16283d}.hidden{display:none!important}.cases{display:grid;gap:8px;margin-top:10px}.case{border-top:1px solid var(--line);padding-top:10px}.case-head{display:flex;justify-content:space-between;gap:8px}.case-state{color:var(--muted);font-size:11px}.source{margin:8px 0}.answer{max-height:200px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.5 Consolas,monospace;margin:6px 0}.svg-preview{display:block;width:100%;height:190px;object-fit:contain;background:#fff;border-radius:5px;margin-top:8px}.score-grid,.comparison-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:8px 0}.save-score,.baseline-button{margin:6px 0}.comparison-box{border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.comparison-item{font-size:11px;color:var(--muted)}.comparison-item strong{display:block;color:var(--text)}
+/* ==========================================================================
+   Codex 状态面板 — 建议样式表
+   ==========================================================================
+   用途：替换 src/public/styles.css 的 L1（3,575 字符压缩单行）与 L3–L10。
+   不修改任何选择器名，只改声明值 —— app.js 依赖 #task-select / #run /
+   .hidden / .primary / .metric.accent 这些钩子，全部保留。
 
-.html-preview-link{display:block;margin:10px 0;padding:8px;border:1px solid var(--line);border-radius:5px}.html-rubric{margin-top:10px}.html-rubric p{margin:6px 0}
-.task-bar{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-top:8px}
-.task-bar button{width:auto;padding:0 14px}
-.task-title{margin-top:8px;font-weight:600;overflow-wrap:anywhere}
-.current-turn{margin-top:6px;color:var(--accent);font:12px/1.4 Consolas,monospace;overflow-wrap:anywhere}
-.agents{max-height:60px;overflow:auto;margin-top:4px;border-top:1px solid var(--line)}
-.agent-row{margin:0;padding:2px 0;color:var(--muted);font:11px/1.35 Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.diagnostics{margin-top:6px;font-size:11px}
+   前置：index.html L3 之后新增
+     <link rel="stylesheet" href="/tokens.css">
+   且 <html> 加 data-theme="dark|light"（缺省 dark，见 §9.4）。
+
+   全部颜色/字号/圆角/间距只引用 tokens.css，本文件不出现字面色值
+   （唯一例外是 .svg-preview 的白色画布，见该处注释）。
+   ========================================================================== */
+
+/* ------------------------------------------------------------------ reset  */
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg-page);
+  color: var(--text-1);
+  font-family: var(--font-ui);
+  font-size: var(--text-md);        /* 13 → 15，正文可读性 */
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --------------------------------------------------------------- layout    */
+.shell {
+  max-width: 560px;                 /* 540 → 560，容纳 15px 正文 */
+  margin: 0 auto;
+  padding: var(--space-6);
+}
+
+.topbar,
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.topbar { margin-bottom: var(--space-6); justify-content: space-between; }
+
+h1, h2, p { margin: 0; }
+
+h1 {
+  font-size: var(--text-xl);        /* 19 → 22 */
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-1);
+}
+
+h1 span {                           /* 「状态面板」 */
+  font-size: var(--text-sm);        /* 14 → 13 */
+  font-weight: var(--weight-regular);
+  color: var(--text-3);
+  margin-left: var(--space-2);
+}
+
+h2 {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-2);             /* 新增：标题不再是纯白，建立层级 */
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
+
+/* ------------------------------------------------------------- connection  */
+.connection,
+.state-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.dot {
+  width: 7px; height: 7px;          /* 6 → 7，配合外环 */
+  border-radius: var(--radius-full);
+  background: var(--text-disabled);
+  box-shadow: 0 0 0 0 transparent;
+  transition: background-color var(--dur-fast) var(--ease-standard),
+              box-shadow var(--dur-fast) var(--ease-standard);
+}
+
+.connection.ok    .dot { background: var(--success); box-shadow: 0 0 0 2px var(--success-subtle); }
+.connection.loading .dot { background: var(--warning); box-shadow: 0 0 0 2px var(--warning-subtle); }
+.connection.error .dot { background: var(--danger);  box-shadow: 0 0 0 2px var(--danger-subtle); }
+
+/* ---------------------------------------------------------------- panels   */
+/* 旧版：panel 与 page 仅差 1.16:1，几乎看不出是两层。现在靠「背景 + 边框 +
+   阴影」三重建立层次，同时把 radius 从 10 统一到 --radius-md。             */
+.panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-5);
+  box-shadow: var(--shadow-1);
+}
+
+.panel + .panel { margin-top: var(--space-6); }
+
+.section-head { margin-bottom: var(--space-4); }
+
+/* --------------------------------------------------------------- metrics   */
+/* 旧版用 1px gap + 背景色冒充分割线，四宫格在窄窗里会糊成一片。改为真实描边，
+   并给每格独立圆角 —— 视觉分组仍然成立，但边界清晰。                        */
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: var(--space-4) var(--space-5);
+  min-width: 0;
+}
+
+.metric span {
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-medium);
+  color: var(--text-3);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
+
+.metric strong {
+  font-family: var(--font-mono);
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-2xl);       /* 25 → 28，与 WPF 主数值统一 */
+  line-height: 1.1;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* 唯一被强调的主数值（#speed） */
+.metric.accent strong { color: var(--accent); }
+
+/* ------------------------------------------------------------- disclosure  */
+summary {
+  cursor: pointer;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  list-style: none;                 /* 自绘 ▸/▾，去掉浏览器三角 */
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+summary::-webkit-details-marker { display: none; }
+
+summary::before {                   /* 旧版用两个不同字符 ▸ ▾，独立着色 */
+  content: "▸";
+  color: var(--text-3);
+  font-size: 10px;
+  transition: transform var(--dur-base) var(--ease-standard);
+}
+
+details[open] > summary::before { transform: rotate(90deg); }
+
+summary:hover { color: var(--text-1); }
+summary:hover::before { color: var(--accent); }
+
+/* 统一焦点环：双环（内 offset 层断开，任何底色上都可见） */
+summary:focus-visible,
+button:focus-visible,
+select:focus-visible,
+a:focus-visible,
+input:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 var(--focus-ring-offset-w) var(--focus-ring-offset),
+              0 0 0 calc(var(--focus-ring-offset-w) + var(--focus-ring-w)) var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+/* 旧版 :focus-visible 只给 outline，在 accent 背景的按钮上会看不见 */
+.primary:focus-visible {
+  box-shadow: 0 0 0 var(--focus-ring-offset-w) var(--focus-ring-offset),
+              0 0 0 calc(var(--focus-ring-offset-w) + var(--focus-ring-w)) var(--focus-ring),
+              var(--shadow-1);
+}
+
+/* ------------------------------------------------------------- text bits   */
+.session-details { font-size: var(--text-xs); }
+.session-id { font-family: var(--font-mono); color: var(--text-3); }
+
+.muted,
+.message { color: var(--text-3); font-size: var(--text-xs); }
+
+.message {
+  margin-top: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: var(--bg-raised);
+}
+
+.message.error {
+  color: var(--danger);
+  background: var(--danger-subtle);
+  border-color: color-mix(in srgb, var(--danger) 32%, transparent);
+}
+
+.message.warn {
+  color: var(--warning);
+  background: var(--warning-subtle);
+  border-color: color-mix(in srgb, var(--warning) 32%, transparent);
+}
+
+.prompt {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  color: var(--text-2);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: var(--space-4);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-hover); text-decoration: underline; text-underline-offset: 2px; }
+a:active { color: var(--accent-active); }
+
+/* --------------------------------------------------------------- controls  */
+.controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4) var(--space-5);
+  margin-top: var(--space-6);
+}
+
+label {
+  display: grid;
+  gap: var(--space-2);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-medium);
+  color: var(--text-3);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  min-width: 0;
+}
+
+select,
+button {
+  height: var(--control-h);
+  min-width: 0;
+  border: 1px solid var(--ctl-border);
+  border-radius: var(--radius-sm);
+  background: var(--ctl-bg);
+  color: var(--ctl-text);
+  padding: 0 var(--space-4);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  transition: background-color var(--dur-fast) var(--ease-standard),
+              border-color var(--dur-fast) var(--ease-standard),
+              color var(--dur-fast) var(--ease-standard);
+}
+
+select:hover,
+button:hover:not(:disabled) {
+  background: var(--ctl-bg-hover);
+  border-color: var(--ctl-border-hover);
+}
+
+select:active,
+button:active:not(:disabled) { background: var(--ctl-bg-active); }
+
+button {
+  cursor: pointer;
+  font-weight: var(--weight-medium);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+}
+
+/* 旧版用 filter:saturate(.4) brightness(.75) —— 会把文字一起压暗，
+   造成「禁用态文字对比度 2.x」的既视感。改为显式的禁用 token。          */
+button:disabled,
+select:disabled {
+  background: var(--ctl-bg-disabled);
+  color: var(--ctl-text-disabled);
+  border-color: var(--border-subtle);
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* 输入框占位符：旧版从未定义，浏览器默认占位色在深色底上约 2.8:1。
+   当前页面只有 <select>，此规则为后续输入框预留，不影响现有渲染。      */
+input::placeholder,
+textarea::placeholder {
+  color: var(--ctl-placeholder);
+  opacity: 1;                        /* Firefox 默认会再压一层透明度 */
+}
+
+.primary {
+  background: var(--accent-fill);
+  color: var(--accent-on-fill);
+  border-color: transparent;
+  font-weight: var(--weight-semibold);
+  box-shadow: var(--shadow-1);
+}
+
+.primary:hover:not(:disabled) {
+  background: var(--accent-fill-hover);
+  border-color: transparent;
+}
+
+.primary:active:not(:disabled) {
+  background: var(--accent-fill-active);
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.30);
+}
+
+.primary:disabled {
+  background: var(--bg-inset);
+  color: var(--text-disabled);
+  border-color: var(--border-subtle);
+}
+
+.secondary {          /* 旧版没有这个类，但 index.html L7/L14 已在用 */
+  background: var(--ctl-bg);
+  color: var(--text-1);
+  border-color: var(--ctl-border);
+}
+
+.hidden { display: none !important; }
+
+/* ----------------------------------------------------------------- cases   */
+.cases {
+  display: grid;
+  gap: var(--space-4);
+  margin-top: var(--space-5);
+}
+
+.case {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-5);
+}
+
+.case:first-child { border-top: 0; padding-top: 0; }
+
+.case-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.case-state { font-size: var(--text-xs); color: var(--text-3); }
+.source { margin: var(--space-4) 0; color: var(--text-2); font-size: var(--text-xs); }
+
+.answer {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  color: var(--text-2);
+  max-height: 200px;
+  overflow: auto;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: var(--space-4);
+}
+
+/* SVG 预览必须落在浅底上：图里的 fill/stroke 是按浅色画的，放深底会消失。
+   这不是主题遗漏，而是一个「画布」语义，故显式固定为白色 + 描边。      */
+.svg-preview {
+  height: 190px;
+  background: #FFFFFF;              /* 唯一字面色值，见上 */
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.score-grid,
+.comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin: var(--space-4) 0;
+}
+
+.save-score,
+.baseline-button { margin: var(--space-3) 0; }
+
+.comparison-box {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-5);
+  margin-top: var(--space-5);
+}
+
+.comparison-item { font-size: var(--text-xs); color: var(--text-3); }
+.comparison-item strong { display: block; color: var(--text-1); font-weight: var(--weight-semibold); }
+
+/* ---------------------------------------------------- html-preview / task   */
+/* 以下对应旧 styles.css L3–L10                                              */
+.html-preview-link {
+  display: block;
+  margin: var(--space-4) 0;
+  padding: var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--accent);
+}
+
+.html-preview-link:hover { background: var(--bg-hover); border-color: var(--accent); }
+
+.html-rubric { margin-top: var(--space-5); }
+.html-rubric p { margin: var(--space-3) 0; color: var(--text-2); font-size: var(--text-xs); }
+
+.task-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+}
+
+.task-bar button {
+  width: auto;
+  padding: 0 var(--space-6);
+  height: var(--control-h-sm);
+}
+
+.task-title {
+  margin-top: var(--space-4);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+
+/* 旧版把「当前回合」做成 accent 色等宽字，和链接抢注意力。
+   降为 text-2 + 左竖条，权重交给结构化标签。                            */
+.current-turn {
+  margin-top: var(--space-3);
+  padding-left: var(--space-4);
+  border-left: 2px solid var(--accent);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.agents {
+  max-height: 72px;
+  overflow: auto;
+  margin-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.agent-row {
+  margin: 0;
+  padding: var(--space-2) var(--space-1);
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-row:hover { background: var(--row-hover); color: var(--text-2); }
+
+.diagnostics { margin-top: var(--space-3); font-size: var(--text-2xs); color: var(--text-3); }
+
+/* --------------------------------------------------------------- motion    */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+  }
+}

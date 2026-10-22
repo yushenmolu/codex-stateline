@@ -1,0 +1,172 @@
+/* ==========================================================================
+   Codex Stateline - design tokens
+   Canonical source: docs/ui-redesign/codex-stateline-ui-redesign.md
+   Dark is the default (matches the shipped widget); the light theme is opt-in
+   through  <html data-theme="light">.  Nothing here changes behaviour: this
+   file only declares variables.  No component rule lives here.
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  --bg-page: #141518;
+  --bg-card: #1C1D21;
+  --bg-raised: #24252A;
+  --bg-inset: #0E0F11;
+  --bg-hover: #2D2E34;
+  --bg-active: #373941;
+  --bg-inverse: #EDEEF2;
+  --border-subtle: #373941;
+  --border-default: #3F414B;
+  --border-strong: #6F7485;
+  --text-1: #EDEEF2;
+  --text-2: #B0B3BF;
+  --text-3: #9A9EAC;
+  --text-disabled: #636674;
+  --text-on-accent: #FFFFFF;
+  --text-on-inverse: #141518;
+  --accent: #8593FF;
+  --accent-hover: #B2BBFF;
+  --accent-active: #D6DBFF;
+  --accent-subtle: #2B2E40;
+  --accent-fill: #4A5AD6;
+  --accent-fill-hover: #5869E4;
+  --accent-fill-active: #394AD0;
+  --accent-on-fill: #FFFFFF;
+  --success: #69D3A2;
+  --success-subtle: #273633;
+  --warning: #F8B659;
+  --warning-subtle: #3B3229;
+  --danger: #FA8088;
+  --danger-subtle: #3B2B2F;
+  --data-1: #8F9CFF;
+  --data-2: #49D4C6;
+  --data-3: #C08DE2;
+  --chart-grid: #373941;
+  --chart-track: #24252A;
+  --focus-ring: #8593FF;
+  --focus-ring-offset: #141518;
+
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.32);
+  --shadow-2: 0 6px 16px -4px rgb(0 0 0 / 0.55), 0 0 0 1px rgb(255 255 255 / 0.04);
+  --shadow-3: 0 18px 48px -12px rgb(0 0 0 / 0.72), 0 0 0 1px rgb(255 255 255 / 0.06);
+
+  /* type scale - dense text steps, wide numeral steps */
+  --font-ui: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+  --text-2xs: 11px;  --leading-2xs: 1.45;
+  --text-xs: 12px;   --leading-xs: 1.5;
+  --text-sm: 13px;   --leading-sm: 1.5;
+  --text-md: 15px;   --leading-md: 1.5;
+  --text-lg: 17px;   --leading-lg: 1.35;
+  --text-xl: 22px;   --leading-xl: 1.2;
+  --text-2xl: 28px;  --leading-2xl: 1.1;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --tracking-tight: -0.01em;
+  --tracking-caps: 0.04em;
+  /* spacing: 4px grid, every margin/padding component snaps to these */
+  --space-0: 0;
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 12px;
+  --space-6: 16px;
+  --space-7: 20px;
+  --space-8: 24px;
+  --space-9: 32px;
+  /* radius: nested = outer - inset */
+  --radius-xs: 3px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-full: 999px;
+  /* control sizes (44px hit target via :before halo, see components) */
+  --control-h-sm: 24px;
+  --control-h: 30px;
+  --control-h-lg: 34px;
+  --focus-ring-w: 2px;
+  --focus-ring-offset-w: 2px;
+
+  --dur-fast: 120ms;
+  --dur-base: 160ms;
+  --dur-slow: 240ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ------------------------------------------------------------------ light */
+/* JS: document.documentElement.dataset.theme =
+       matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'; */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg-page: #F7F8FA;
+  --bg-card: #FFFFFF;
+  --bg-raised: #FFFFFF;
+  --bg-inset: #F1F2F6;
+  --bg-hover: #F1F2F6;
+  --bg-active: #EEEFF4;
+  --bg-inverse: #181B25;
+  --border-subtle: #E8EAEF;
+  --border-default: #CBCED8;
+  --border-strong: #878CA1;
+  --text-1: #181B25;
+  --text-2: #4E515F;
+  --text-3: #676B79;
+  --text-disabled: #9699A6;
+  --text-on-accent: #FFFFFF;
+  --text-on-inverse: #F7F8FA;
+  --accent: #2637BA;
+  --accent-hover: #1C2887;
+  --accent-active: #151E66;
+  --accent-subtle: #EEEFF9;
+  --accent-fill: #3043CF;
+  --accent-fill-hover: #2637BA;
+  --accent-fill-active: #1C2887;
+  --accent-on-fill: #FFFFFF;
+  --success: #1E714A;
+  --success-subtle: #EDF4F1;
+  --warning: #8E4C0B;
+  --warning-subtle: #F6F1EB;
+  --danger: #AB212A;
+  --danger-subtle: #F8EDEE;
+  --data-1: #2D3EBE;
+  --data-2: #1A7F75;
+  --data-3: #7636A1;
+  --chart-grid: #DDE0E9;
+  --chart-track: #F1F2F6;
+  --focus-ring: #3043CF;
+  --focus-ring-offset: #FFFFFF;
+
+  --shadow-1: 0 1px 2px rgb(16 24 40 / 0.06);
+  --shadow-2: 0 6px 16px -4px rgb(16 24 40 / 0.12), 0 0 0 1px rgb(16 24 40 / 0.04);
+  --shadow-3: 0 18px 48px -12px rgb(16 24 40 / 0.20), 0 0 0 1px rgb(16 24 40 / 0.06);
+}
+
+/* ------------------------------------------------------- component wiring  */
+/* State colours, expressed once so no component invents its own.            */
+:root {
+  --ctl-bg: var(--bg-raised);
+  --ctl-bg-hover: var(--bg-hover);
+  --ctl-bg-active: var(--bg-active);
+  --ctl-bg-disabled: var(--bg-inset);
+  --ctl-border: var(--border-strong);
+  --ctl-border-hover: var(--accent);
+  --ctl-text: var(--text-1);
+  --ctl-text-disabled: var(--text-disabled);
+  --ctl-placeholder: var(--text-3);
+  --row-hover: var(--bg-hover);
+  --row-selected: var(--accent-subtle);
+  --row-selected-text: var(--text-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-slow: 0ms;
+  }
+}

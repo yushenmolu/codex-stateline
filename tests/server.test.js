@@ -23,6 +23,23 @@ let portGate = Promise.resolve();
 async function startApp(t, { telemetry, liveTelemetry, benchmark, taskSummary, usageSummary, onApp, defaults = { snapshot: () => ({
   model: { state: 'unavailable', source: 'none', reason: 'key_missing', value: null },
   reasoningEffort: { state: 'unavailable', source: 'none', reason: 'key_missing', value: null },
+  availableModels: [
+    { slug: 'configured', displayName: '当前配置' },
+    { slug: 'example-provider/gpt-6-astra', displayName: 'GPT-6 Astra · Example' },
+    { slug: 'example-provider/gpt-6.1-sol', displayName: 'GPT-6.1 Sol · Example' },
+    { slug: 'example-provider/deepseek-v4.1-flash', displayName: 'DeepSeek V4.1 Flash · Example' },
+  ],
+  availableEfforts: [
+    { value: 'configured', label: '当前配置' },
+    { value: 'low', label: 'low' },
+    { value: 'medium', label: 'medium' },
+    { value: 'high', label: 'high' },
+    { value: 'xhigh', label: 'xhigh' },
+    { value: 'max', label: 'max' },
+    { value: 'ultra', label: 'ultra' },
+    { value: 'persistent', label: 'persistent' },
+    { value: 'none', label: 'none' },
+  ],
 }) }, shutdownToken, onShutdown } = {}) {
   const previous = portGate;
   let release;

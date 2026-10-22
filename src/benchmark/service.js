@@ -2,9 +2,18 @@ import { randomUUID, createHash } from 'node:crypto';
 import { casesForVersion, caseIdsFor, CASE_SET_VERSION, RUBRIC_VERSION, ANIMATED_VERSION, HTML_ANIMATED_VERSION, COCKPIT_VERSION } from './cases.js';
 import { validateScores, completeScores, compareRuns } from './scoring.js';
 import { createStore } from './store.js';
-import { createRunner, APPROVED_MODELS, SAFE_PROGRESS_EVENTS, pickDiagnostics } from './runner.js';
+import { createRunner, isAllowedModel, isAllowedEffort, SAFE_PROGRESS_EVENTS, pickDiagnostics } from './runner.js';
 
 const SCHEMA_VERSION = 1;
+// A provider that drops the stream is worth one more attempt: the CLI already
+// retried its own connection, so this only covers the case where the whole turn
+// died. Every other failure stays single-shot, because a bad credential, a rate
+// limit or an unusable model cannot be fixed by running the same request twice.
+// 上游挂死（零输出但有报错）与断流是同一类问题——请求在提供方那侧就已经死了，
+// 换一次尝试有机会拿到另一条中转线路。超时则不可重试：预算耗尽时再跑一遍只是
+// 再耗一份预算，而挂死恰恰是此前最常见的失败形态，不给它重试等于重试机制空转。
+const RETRYABLE_CODES = new Set(['upstream_stream_lost', 'upstream_stalled']);
+const MAX_ATTEMPTS = 2;
 
 function publicRun(run) {
   return { runId: run.runId, requestId: run.requestId, status: run.status, model: run.model, reasoningEffort: run.reasoningEffort, caseResults: run.caseResults, caseSetVersion: run.caseSetVersion, rubricVersion: run.rubricVersion, schemaVersion: run.schemaVersion };
@@ -16,7 +25,17 @@ function snapshotFromState(state, active, progress) {
   return { status: active ? active.status : 'idle', activeRun: active ? { ...publicRun(active), progress } : null, latestRun: runs.at(-1) ?? null, runs, baseline: baseline ? { runId: baseline.runId } : null, comparison: baseline ? compareRuns(state.runs, baseline) : null, available: true };
 }
 
-export async function createBenchmarkService({ store = createStore(), runner = createRunner(), cliVersion = '0.162', catalogAvailable = true, wallClock = () => Date.now(), monotonicClock = () => performance.now() } = {}) {
+export async function createBenchmarkService({ store = createStore(), runner, modelPolicy, effortPolicy, cliVersion = '0.162', catalogAvailable = true, wallClock = () => Date.now(), monotonicClock = () => performance.now() } = {}) {
+  // The policies mirror the configured catalog and effort list; an omitted
+  // policy keeps direct programmatic use permissive, while the HTTP layer always
+  // supplies both.
+  const resolvePolicy = (policy) => {
+    if (policy === undefined) return null;
+    try { return typeof policy === 'function' ? policy() : policy; } catch { return []; }
+  };
+  const currentModels = () => resolvePolicy(modelPolicy);
+  const currentEfforts = () => resolvePolicy(effortPolicy);
+  const executeRunner = runner ?? createRunner({ modelPolicy: currentModels, effortPolicy: currentEfforts });
   await store.load();
   let active = null;
   let closing = false;
@@ -52,24 +71,39 @@ export async function createBenchmarkService({ store = createStore(), runner = c
     });
     for (const caseDef of casesForVersion(record.caseSetVersion)) {
       if (record.abortController.signal.aborted) { record.status = 'cancelled'; break; }
-      try {
-        const result = await runner.runCase({ model: record.model, reasoningEffort: record.reasoningEffort, caseDef, signal: record.abortController.signal, onProgress: value => onProgress(record, value) });
-        const item = record.caseResults.find((entry) => entry.caseId === caseDef.caseId);
-        if (item) {
-          const diagnostics = pickDiagnostics(result?.diagnostics);
-          Object.assign(item, { status: 'completed', answer: result.answer }, diagnostics ? { diagnostics } : {});
+      let outcome = null;
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS && !outcome; attempt++) {
+        try {
+          const result = await executeRunner.runCase({ model: record.model, reasoningEffort: record.reasoningEffort, caseDef, signal: record.abortController.signal, onProgress: value => onProgress(record, value) });
+          outcome = { result };
+        } catch (cause) {
+          const code = ['cancelled', 'timed_out', 'spawn_failed', 'process_failed', 'authentication_failed', 'rate_limited', 'model_unavailable', 'malformed_output', 'incomplete_output', 'answer_too_large', 'output_too_large', 'invalid_config', 'upstream_stream_lost', 'upstream_stalled'].includes(cause?.code) ? cause.code : 'process_failed';
+          // One more attempt is only worth the wait when the failure came from the
+          // provider's side of the stream, and only while the run is still wanted.
+          if (RETRYABLE_CODES.has(code) && attempt < MAX_ATTEMPTS && !record.abortController.signal.aborted) {
+            runtime.get(record).stage = 'starting';
+            continue;
+          }
+          outcome = { code, cause };
         }
-      } catch (cause) {
-        const code = ['cancelled', 'timed_out', 'spawn_failed', 'process_failed', 'authentication_failed', 'rate_limited', 'model_unavailable', 'malformed_output', 'incomplete_output', 'answer_too_large', 'output_too_large', 'invalid_config'].includes(cause?.code) ? cause.code : 'process_failed';
-        record.status = code === 'cancelled' ? 'cancelled' : code === 'timed_out' ? 'timed_out' : 'failed';
-        const item = record.caseResults.find((entry) => entry.caseId === caseDef.caseId);
-        if (item) {
-          const diagnostics = pickDiagnostics(cause?.diagnostics);
-          Object.assign(item, { status: record.status, errorCode: code }, diagnostics ? { diagnostics } : {});
-          if (cause?.cleanupState === 'temporary_directory_retained_process_exit_unconfirmed') item.cleanupState = 'temporary_directory_retained_process_exit_unconfirmed';
-        }
-        break;
       }
+      if (outcome.result) {
+        const item = record.caseResults.find((entry) => entry.caseId === caseDef.caseId);
+        if (item) {
+          const diagnostics = pickDiagnostics(outcome.result?.diagnostics);
+          Object.assign(item, { status: 'completed', answer: outcome.result.answer }, diagnostics ? { diagnostics } : {});
+        }
+        continue;
+      }
+      const { code, cause } = outcome;
+      record.status = code === 'cancelled' ? 'cancelled' : code === 'timed_out' ? 'timed_out' : 'failed';
+      const item = record.caseResults.find((entry) => entry.caseId === caseDef.caseId);
+      if (item) {
+        const diagnostics = pickDiagnostics(cause?.diagnostics);
+        Object.assign(item, { status: record.status, errorCode: code }, diagnostics ? { diagnostics } : {});
+        if (cause?.cleanupState === 'temporary_directory_retained_process_exit_unconfirmed') item.cleanupState = 'temporary_directory_retained_process_exit_unconfirmed';
+      }
+      break;
     }
     if (record.status === 'running') record.status = 'completed';
     await store.mutate((state) => {
@@ -105,7 +139,7 @@ export async function createBenchmarkService({ store = createStore(), runner = c
     },
     async run({ requestId, model = 'configured', reasoningEffort = 'configured', mode = 'static' }) {
       if (closing) throw serviceError('Benchmark service is closing.', 503, 'service_closing');
-      if (!APPROVED_MODELS.has(model) || !['configured', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(reasoningEffort)) throw serviceError('Benchmark configuration is invalid.', 400, 'invalid_config');
+      if (!isAllowedModel(model, currentModels()) || !isAllowedEffort(reasoningEffort, currentEfforts())) throw serviceError('Benchmark configuration is invalid.', 400, 'invalid_config');
       if (!catalogAvailable) throw serviceError('Benchmark feature is unavailable.', 503, 'benchmark_unavailable');
       if (!['static', 'animated', 'html-animated', 'cockpit'].includes(mode)) throw serviceError('Benchmark mode is invalid.', 400, 'schema_invalid');
       const caseSetVersion = mode === 'cockpit' ? COCKPIT_VERSION : mode === 'html-animated' ? HTML_ANIMATED_VERSION : mode === 'animated' ? ANIMATED_VERSION : CASE_SET_VERSION;
@@ -123,7 +157,7 @@ export async function createBenchmarkService({ store = createStore(), runner = c
         throw serviceError('A benchmark run is already active.', 409, 'run_active');
       }
       const record = { runId: randomUUID(), requestId, requestPayloadHash, status: 'queued', createdAt: new Date().toISOString(), createdSeq: 0, cliVersion, model, reasoningEffort, caseSetVersion, rubricVersion, schemaVersion: SCHEMA_VERSION, caseResults: casesForVersion(caseSetVersion).map((item) => ({ caseId: item.caseId, status: 'queued' })), abortController: new AbortController() };
-      runtime.set(record, { stage: 'queued', started: monotonicClock(), budgetMs: Number.isFinite(runner.budgetMs) && runner.budgetMs > 0 ? runner.budgetMs : null, lastEvent: null });
+      runtime.set(record, { stage: 'queued', started: monotonicClock(), budgetMs: Number.isFinite(executeRunner.budgetMs) && executeRunner.budgetMs > 0 ? executeRunner.budgetMs : null, lastEvent: null });
       active = record;
       let releaseReservation;
       const reservationReady = new Promise((resolve) => { releaseReservation = resolve; });

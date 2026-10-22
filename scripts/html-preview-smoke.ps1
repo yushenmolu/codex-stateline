@@ -134,10 +134,22 @@ function Delete-ProfileTree([string]$path){
     Remove-Item -LiteralPath $path -Force
 }
 function Assert-Status([string]$expected,[switch]$EmptyFrame){
+    # The page resolves the service instance and then polls the preview endpoint, so
+    # the expected text arrives asynchronously. Wait for it instead of sampling once:
+    # a single read can catch the intermediate "正在验证服务实例…" status and report a
+    # false failure on a run that is about to render correctly.
+    $deadline=[Diagnostics.Stopwatch]::StartNew()
+    $actual=''
+    $html=''
+    while($deadline.ElapsedMilliseconds -lt 15000){
+        $root=(Cdp 'DOM.getDocument' @{depth=-1;pierce=$true}).root.nodeId
+        $node=(Cdp 'DOM.querySelector' @{nodeId=$root;selector='#preview-status'}).nodeId
+        $html=if($node){(Cdp 'DOM.getOuterHTML' @{nodeId=$node}).outerHTML}else{''}
+        $actual=if($node){[Net.WebUtility]::HtmlDecode(($html -replace '<[^>]*>',''))}else{'<missing #preview-status>'}
+        if($actual -match [Regex]::Escape($expected)){break}
+        Start-Sleep -Milliseconds 150
+    }
     $root=(Cdp 'DOM.getDocument' @{depth=-1;pierce=$true}).root.nodeId
-    $node=(Cdp 'DOM.querySelector' @{nodeId=$root;selector='#preview-status'}).nodeId
-    $html=if($node){(Cdp 'DOM.getOuterHTML' @{nodeId=$node}).outerHTML}else{''}
-    $actual=if($node){[Net.WebUtility]::HtmlDecode(($html -replace '<[^>]*>',''))}else{'<missing #preview-status>'}
     $failure=$null
     if($actual -notmatch [Regex]::Escape($expected)){$failure='Unexpected preview state; expected '+$expected}
     elseif($EmptyFrame -and (Cdp 'DOM.querySelector' @{nodeId=$root;selector='iframe'}).nodeId){$failure='Failed/pending preview retained a frame.'}
@@ -159,7 +171,7 @@ try {
     $null=Fixture-Command @{command='select';fixture=$FixtureName}
     $url='http://127.0.0.1:4173/preview#v=1&instanceId='+$ready.instanceId+'&runId='+$ready.runId
     # Production launch has no debug switches. WP3 owns this source.
-    Add-Type -Path (Join-Path $PSScriptRoot 'native/BrowserPreview.cs') -ReferencedAssemblies System.dll,System.Core.dll,System.Net.Http.dll,System.Web.Extensions.dll
+    Add-Type -Path (Join-Path $PSScriptRoot 'native/BrowserPreview.cs'),(Join-Path $PSScriptRoot 'native/CockpitBrowserGuard.cs') -ReferencedAssemblies System.dll,System.Core.dll,System.Net.Http.dll,System.Web.Extensions.dll
     $target=New-Object CodexNative.PreviewTarget
     $target.InstanceId=$ready.instanceId;$target.RunId=$ready.runId;$target.ServiceGeneration=1;$target.WindowGeneration=1;$target.SelectionGeneration=1
     $before=@(Get-Process msedge -ErrorAction SilentlyContinue|ForEach-Object{@{id=$_.Id;ticks=$_.StartTime.ToUniversalTime().Ticks}})
@@ -234,7 +246,8 @@ try {
     if($newReady.instanceId -eq $ready.instanceId){throw 'Fixture instance did not change.'}
     Navigate $url;Assert-Status 'instance_mismatch' -EmptyFrame;Capture 'instance-mismatch'
     $requests=@($script:events|Where-Object method -eq 'Network.requestWillBeSent')
-    $permitted='^http://127\.0\.0\.1:4173/(preview(?:#.*)?|preview-frame|preview\.(js|css)|api/capabilities|api/benchmark/preview\?runId=[0-9a-f-]+&instanceId=[0-9a-f-]+)$'
+    # The preview page links the shared design tokens sheet, so the allowlist covers it.
+    $permitted='^http://127\.0\.0\.1:4173/(preview(?:#.*)?|preview-frame|(?:preview|tokens)\.(?:js|css)|api/capabilities|api/benchmark/preview\?runId=[0-9a-f-]+&instanceId=[0-9a-f-]+)$'
     if(@($requests|Where-Object{$_.params.request.url -notmatch $permitted}).Count){throw 'Unexpected network request; inspect events.json.'}
     $frameNavigation='^http://127\.0\.0\.1:4173/(preview(?:#v=1&instanceId=[0-9a-f-]+&runId=[0-9a-f-]+)?|preview-frame)$'
     if(@($script:events|Where-Object{$_.method -eq 'Page.frameNavigated' -and $_.params.frame.url -notmatch $frameNavigation}).Count){throw 'Unexpected frame navigation; inspect events.json.'}

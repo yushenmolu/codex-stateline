@@ -1,12 +1,12 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param([switch]$Fixture,[switch]$SelfTest,[string]$ScreenshotPath,[string]$ResultScreenshotPath,[switch]$LoadOnly)
 $ErrorActionPreference = 'Stop'
 if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') { throw 'Run with Windows powershell.exe -STA; launcher must invoke this script in the same STA process.' }
-Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase,System.Net.Http,System.Web.Extensions
+Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase,System.Net.Http,System.Web.Extensions,System.Windows.Forms,System.Drawing
 if (-not ('CodexNative.WidgetWindow' -as [type])) {
-    $refs = @('System.dll','System.Core.dll','System.Xml.dll','System.Xaml.dll','System.Net.Http.dll','System.Web.Extensions.dll',([Windows.DependencyObject].Assembly.Location),([Windows.Media.Visual].Assembly.Location),([Windows.Window].Assembly.Location))
+    $refs = @('System.dll','System.Core.dll','System.Xml.dll','System.Xaml.dll','System.Net.Http.dll','System.Web.Extensions.dll','System.Windows.Forms.dll','System.Drawing.dll',([Windows.DependencyObject].Assembly.Location),([Windows.Media.Visual].Assembly.Location),([Windows.Window].Assembly.Location))
     # Each compilation unit has its own imports; compile files together rather than concatenate namespaces.
-    Add-Type -Path (Join-Path $PSScriptRoot 'native/SafeSvg.cs'),(Join-Path $PSScriptRoot 'native/WidgetClient.cs'),(Join-Path $PSScriptRoot 'native/BrowserPreview.cs'),(Join-Path $PSScriptRoot 'native/CockpitBrowserGuard.cs') -ReferencedAssemblies $refs
+    Add-Type -Path (Join-Path $PSScriptRoot 'native/SafeSvg.cs'),(Join-Path $PSScriptRoot 'native/WidgetClient.cs'),(Join-Path $PSScriptRoot 'native/BrowserPreview.cs'),(Join-Path $PSScriptRoot 'native/CockpitBrowserGuard.cs'),(Join-Path $PSScriptRoot 'native/TrayIcon.cs') -ReferencedAssemblies $refs
 }
 if ($LoadOnly) { return }
 if ($SelfTest) {

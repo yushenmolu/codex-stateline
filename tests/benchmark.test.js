@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, stat, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRunner, resolveExecutable, APPROVED_MODELS, resolveBenchmarkModel, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS, TIMEOUT_ENV_KEY, resolveTimeoutMs, pickDiagnostics, DIAGNOSTIC_KEYS } from '../src/benchmark/runner.js';
+import { createRunner, resolveExecutable, APPROVED_MODELS, resolveBenchmarkModel, isAllowedModel, isAllowedEffort, EFFORTS, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS, TIMEOUT_ENV_KEY, resolveTimeoutMs, pickDiagnostics, DIAGNOSTIC_KEYS, MAX_ANSWER, MAX_STREAM } from '../src/benchmark/runner.js';
 import { createBenchmarkService } from '../src/benchmark/service.js';
 import { createStore } from '../src/benchmark/store.js';
 import { CASES, LEGACY_CASES, RUBRIC_VERSION, ANIMATED_CASES, HTML_ANIMATED_CASES, HTML_ANIMATED_VERSION, isRegisteredCase } from '../src/benchmark/cases.js';
@@ -181,6 +181,13 @@ test('runner classifies only explicit structured failure evidence, including non
     [{ type: 'error', message: '401 429 model_not_found private-secret' }, 1, 'process_failed'],
     [{ type: 'error', error: { code: 'unknown', status: 403 } }, 1, 'process_failed'],
     [{ type: 'item.completed', item: { type: 'agent_message', text: '401 private-secret' } }, 1, 'process_failed'],
+    // A provider that drops the stream is not a local environment problem. The bare
+    // form carries no structured field, so only the CLI's own wording identifies it.
+    [{ type: 'turn.failed', error: { message: 'stream disconnected before completion: UPSTREAM: connection lost mid-reply (stream error: stream ID 101; INTERNAL_ERROR; received from peer)' } }, 1, 'upstream_stream_lost'],
+    [{ type: 'error', message: 'connection lost mid-reply (stream error: stream ID 47; INTERNAL_ERROR; received from peer)' }, 1, 'upstream_stream_lost'],
+    // The retry notice quotes the same phrase while the CLI is still working, so the
+    // retry wording has to win or a live run would be killed as a lost stream.
+    [{ type: 'error', message: 'Reconnecting... 5/5 (stream disconnected before completion: UPSTREAM: origin did not respond)' }, 1, 'process_failed'],
     [null, 1, 'process_failed'],
   ];
   for (const [event, exitCode, expected] of fixtures) {
@@ -228,14 +235,16 @@ test('runner diagnostics count error events and classify reconnect notices witho
   t.after(() => rm(root, { recursive: true, force: true }));
   const fixtures = [
     {
-      name: 'reconnect-error-event',
+      name: 'reconnect-error-event-then-nonzero-exit',
       events: [{ type: 'error', message: 'Reconnecting... 1/5 private-secret' }],
       stderr: 'private-secret',
+      // A reconnect notice is recoverable, so the run is classified by the exit
+      // that follows it instead of being killed on the notice itself.
       expectedCode: 'process_failed',
       expectedErrorEventCount: 1,
       expectedTurnFailedEventCount: 0,
       expectedClass: 'reconnect_notice',
-      expectedExitCode: null
+      expectedExitCode: 1
     },
     {
       name: 'rate-limited-turn-failed',
@@ -245,6 +254,16 @@ test('runner diagnostics count error events and classify reconnect notices witho
       expectedErrorEventCount: 0,
       expectedTurnFailedEventCount: 1,
       expectedClass: 'rate_limit_notice',
+      expectedExitCode: null
+    },
+    {
+      name: 'upstream-stream-lost-turn-failed',
+      events: [{ type: 'turn.failed', error: { message: 'stream disconnected before completion: connection lost mid-reply (stream error: stream ID 101; INTERNAL_ERROR; received from peer)' } }],
+      stderr: '',
+      expectedCode: 'upstream_stream_lost',
+      expectedErrorEventCount: 0,
+      expectedTurnFailedEventCount: 1,
+      expectedClass: 'upstream_notice',
       expectedExitCode: null
     },
     {
@@ -318,6 +337,72 @@ test('runner diagnostics count error events and classify reconnect notices witho
     assert.equal(result.diagnostics.stderrBytes, 0);
     assert.deepEqual(Object.keys(result.diagnostics).sort(), [...DIAGNOSTIC_KEYS].sort());
   });
+  await t.test('a reconnect notice does not kill a run that then completes', async () => {
+    // The CLI reports a transient reconnect as an `error` event and keeps
+    // streaming; treating it as terminal discarded a finished artwork.
+    const runner = createRunner({ tempRoot: root, spawnImpl: () => {
+      const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: { end() { queueMicrotask(() => {
+        const line = (value) => JSON.stringify(value) + String.fromCharCode(10);
+        child.stdout.emit('data', line({ type: 'thread.started', thread_id: 'thread' }));
+        child.stdout.emit('data', line({ type: 'error', message: 'Reconnecting... 1/5 private-secret' }));
+        child.stdout.emit('data', line({ type: 'item.completed', item: { type: 'agent_message', text: '<svg><!-- recovered --></svg>' } }));
+        child.stdout.emit('data', line({ type: 'turn.completed' }));
+        child.emit('close', 0);
+      }); } }, kill() { this.emit('close', null, 'SIGKILL'); } });
+      return child;
+    } });
+    const result = await runner.runCase({ caseDef: CASES[0] });
+    assert.equal(result.answer, '<svg><!-- recovered --></svg>');
+    assert.equal(result.diagnostics.errorEventCount, 1);
+    assert.equal(result.diagnostics.turnFailedEventCount, 0);
+    assert.equal(result.diagnostics.lastErrorClass, 'reconnect_notice');
+    assert.equal(result.diagnostics.terminationReason, 'completed');
+    assert.equal(result.diagnostics.exitCode, 0);
+    assert.equal(JSON.stringify(result.diagnostics).includes('private-secret'), false);
+  });
+});
+
+test('service retries a lost upstream stream once and keeps every other failure single-shot', async () => {
+  const storeFor = (state) => ({ load: async () => {}, snapshot: async () => structuredClone(state), mutate: async fn => fn(state), close: async () => {} });
+  const failing = (code, calls) => ({ runCase: async () => { calls.push(code); throw Object.assign(new Error('private-secret'), { code }); } });
+
+  // A provider that dropped the stream is worth one more attempt; a second loss is
+  // reported as that same code so the cause stays visible instead of becoming generic.
+  const retriedState = { runs: [], reservations: {}, nextSeq: 1 };
+  const retried = [];
+  const retryService = await createBenchmarkService({ store: storeFor(retriedState), runner: failing('upstream_stream_lost', retried) });
+  await retryService.run({ requestId: 'retry_request_123' });
+  await retryService.close();
+  assert.deepEqual(retried, ['upstream_stream_lost', 'upstream_stream_lost']);
+  assert.equal(retriedState.runs[0].status, 'failed');
+  assert.equal(retriedState.runs[0].caseResults[0].errorCode, 'upstream_stream_lost');
+
+  // One transient loss followed by a good answer must be recorded as a completed run.
+  const recoveredState = { runs: [], reservations: {}, nextSeq: 1 };
+  let attempts = 0;
+  const recovered = await createBenchmarkService({ store: storeFor(recoveredState), runner: { runCase: async () => {
+    attempts += 1;
+    if (attempts === 1) throw Object.assign(new Error('private-secret'), { code: 'upstream_stream_lost' });
+    return { answer: '<svg><!-- recovered --></svg>', diagnostics: { lastPhase: 'waiting', terminationReason: 'completed' } };
+  } } });
+  await recovered.run({ requestId: 'recovered_request_123' });
+  await recovered.close();
+  assert.equal(attempts, 2);
+  assert.equal(recoveredState.runs[0].status, 'completed');
+  assert.equal(recoveredState.runs[0].caseResults[0].status, 'completed');
+  assert.equal(recoveredState.runs[0].caseResults[0].answer, '<svg><!-- recovered --></svg>');
+
+  // Every other classified failure is not retried: the same request cannot fix a
+  // credential, a rate limit or an unusable model.
+  for (const code of ['authentication_failed', 'rate_limited', 'model_unavailable', 'invalid_config', 'timed_out', 'cancelled']) {
+    const state = { runs: [], reservations: {}, nextSeq: 1 };
+    const calls = [];
+    const service = await createBenchmarkService({ store: storeFor(state), runner: failing(code, calls) });
+    await service.run({ requestId: `single_${code}_123` });
+    await service.close();
+    assert.deepEqual(calls, [code], `${code} must not be retried`);
+    assert.equal(state.runs[0].caseResults[0].errorCode, code);
+  }
 });
 
 test('service allowlists classified failures and never persists raw diagnostics', async () => {
@@ -386,7 +471,7 @@ test('runner cleans temp directories on spawn, event, parse, output, timeout and
       child = Object.assign(new EventEmitter(), { pid: 123, stdout: new EventEmitter(), stderr: new EventEmitter(), kill() { killed++; this.emit('close', null, 'SIGKILL'); }, stdin: { end() { queueMicrotask(() => {
         if (mode === 'error') { child.emit('error', new Error('private-spawn-details')); child.emit('close', null); }
         if (mode === 'parse' || mode === 'event') { child.stdout.emit('data', mode === 'parse' ? 'bad' : JSON.stringify({ type: 'turn.failed' })); child.emit('close', 0); }
-        if (mode === 'overflow') child.stdout.emit('data', Buffer.alloc(256 * 1024 + 1));
+        if (mode === 'overflow') child.stdout.emit('data', Buffer.alloc(MAX_STREAM + 1));
         if (mode === 'cancel') controller.abort();
       }); } } });
       return child;
@@ -833,7 +918,7 @@ test('runner total deadline policy uses virtual time without live CLI calls', as
   }
 });
 
-test('approved full model slugs and legacy aliases resolve only CLI argv', async t => {
+test('static fallback slugs and legacy aliases resolve only CLI argv', async t => {
   const root = await mkdtemp(join(tmpdir(), 'runner-models-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   assert.equal(DEFAULT_TIMEOUT_MS, 900000);
@@ -852,6 +937,47 @@ test('approved full model slugs and legacy aliases resolve only CLI argv', async
     if (model === 'configured') assert.equal(argv.includes('--model'), false);
     else assert.equal(argv[argv.indexOf('--model') + 1], model.startsWith('gpt-') ? 'example-provider/' + model : model);
   }
+});
+
+test('catalog slugs widen the model gate and full Codex efforts pass it', () => {
+  assert.equal(EFFORTS.has('persistent'), true);
+  assert.equal(EFFORTS.has('none'), true);
+  const catalog = [{ slug: 'configured', displayName: '当前配置' }, { slug: 'example-provider/gpt-6.2-luna', displayName: 'Luna' }];
+  assert.equal(isAllowedModel('example-provider/gpt-6.2-luna', catalog), true);
+  assert.equal(isAllowedModel('example-provider/unknown-model', catalog), false);
+  assert.equal(isAllowedModel('configured', catalog), true);
+  // A legacy short name resolves to its canonical slug before the policy check.
+  assert.equal(isAllowedModel('gpt-6.1-sol', [{ slug: 'example-provider/gpt-6.1-sol', displayName: 'Sol' }]), true);
+  // A catalog that contributed nothing keeps the historical static fallback.
+  assert.equal(isAllowedModel('example-provider/gpt-6-astra', [{ slug: 'configured', displayName: '当前配置' }]), true);
+  assert.equal(isAllowedModel('example-provider/unknown-model', [{ slug: 'configured', displayName: '当前配置' }]), false);
+  assert.equal(isAllowedEffort('configured', [{ value: 'configured', label: '当前配置' }]), true);
+  assert.equal(isAllowedEffort('persistent', [{ value: 'configured', label: '当前配置' }, { value: 'low', label: '低' }]), false);
+  assert.equal(isAllowedEffort('none', [{ value: 'configured', label: '当前配置' }, { value: 'none', label: '无' }]), true);
+  // Undefined policy keeps the historical static set plus the identifier guard.
+  assert.equal(isAllowedModel('example-provider/anything-not-policed'), false);
+  assert.equal(isAllowedModel('example-provider/gpt-6.1-sol'), true);
+});
+
+test('a catalog-approved slug reaches the CLI verbatim instead of null', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'runner-catalog-argv-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const catalog = ['example-provider/gpt-6-astra', 'example-provider/gpt-6.1-sol', 'example-provider/kimi-k3'].map(slug => ({ slug, displayName: slug }));
+  for (const model of ['example-provider/gpt-6-astra', 'example-provider/gpt-6.1-sol', 'example-provider/kimi-k3']) {
+    let argv;
+    const runner = createRunner({ tempRoot: root, modelPolicy: catalog, spawnImpl: (_exe, args) => {
+      argv = args;
+      const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: { end() {
+        queueMicrotask(() => { child.stdout.emit('data', JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: '<svg/>' } }) + String.fromCharCode(10) + JSON.stringify({ type: 'turn.completed' }) + String.fromCharCode(10)); child.emit('close', 0); });
+      } } });
+      return child;
+    } });
+    assert.equal((await runner.runCase({ model, caseDef: CASES[0] })).answer, '<svg/>');
+    assert.equal(argv[argv.indexOf('--model') + 1], model, 'a catalog slug must never be stringified from null');
+  }
+  // A slug outside the catalog policy is rejected before spawn, never passed as null.
+  const rejecting = createRunner({ tempRoot: root, modelPolicy: catalog, spawnImpl: () => assert.fail('an unknown model must not spawn') });
+  await assert.rejects(rejecting.runCase({ model: 'unknown/vendor-model', caseDef: CASES[0] }), { code: 'invalid_config' });
 });
 
 test('bounded incremental progress publishes safe event names and local times only', async t => {
@@ -1184,7 +1310,9 @@ test('v8 actual runner keeps service active progress stopping until delayed clos
     finishKill();
     child.emit('close', null, 'SIGKILL');
     // Drain real runner file cleanup and service persistence without a polling timer.
-    for (let i = 0; i < 40 && (await service.snapshot()).activeRun; i++) await new Promise(resolve => setImmediate(resolve));
+    // A fixed iteration count can be exhausted under machine load, so bound it by time.
+    const drainDeadline = Date.now() + 5000;
+    while ((await service.snapshot()).activeRun && Date.now() < drainDeadline) await new Promise(resolve => setImmediate(resolve));
     const terminal = await service.snapshot();
     assert.equal(terminal.activeRun, null);
     assert.equal(terminal.latestRun.status, 'failed');
@@ -1303,13 +1431,44 @@ test('pelican runner succeeds on quiet long output and terminates only at the ab
   }
 });
 
+test('pelican runner budgets the answer separately from the reasoning stream', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'pelican-stream-budget-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  // A reasoning-heavy run re-emits full summaries and legitimately streams far
+  // more than the answer it produces. Only the retained answer is bounded.
+  const answer = '<html>' + 'x'.repeat(MAX_ANSWER - 512) + '</html>';
+  const reasoning = 'r'.repeat(1024 * 1024);
+  let child;
+  const runner = createRunner({ tempRoot: root, spawnImpl: () => {
+    child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: { end() {
+      queueMicrotask(() => {
+        const lines = [
+          { type: 'thread.started' },
+          { type: 'turn.started' },
+          ...Array.from({ length: 6 }, () => ({ type: 'item.completed', item: { type: 'reasoning', text: reasoning } })),
+          { type: 'item.completed', item: { type: 'agent_message', text: answer } },
+          { type: 'turn.completed' }
+        ].map(JSON.stringify).join(String.fromCharCode(10)) + String.fromCharCode(10);
+        assert.ok(Buffer.byteLength(lines) > MAX_ANSWER, 'the fixture must exceed the old whole-stream cap');
+        assert.ok(Buffer.byteLength(lines) < MAX_STREAM, 'the fixture stays inside the runaway guard');
+        child.stdout.emit('data', lines);
+        child.emit('close', 0);
+      });
+    } } });
+    return child;
+  } });
+  const result = await runner.runCase({ caseDef: CASES[0] });
+  assert.equal(result.answer, answer);
+  assert.equal(result.diagnostics.terminationReason, 'completed');
+});
+
 test('pelican runner classifies cancellation, invalid output and unconfirmed cleanup safely', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'pelican-failure-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const fixtures = [
     ['invalid-output', 'malformed_output', 'invalid_output', null, null],
     ['incomplete-output', 'incomplete_output', 'invalid_output', null, null],
-    ['oversized-output', 'output_too_large', 'invalid_output', null, null],
+    ['oversized-output', 'answer_too_large', 'invalid_output', null, null],
     ['cleanup-unconfirmed', 'process_failed', 'budget_exhausted', 'temporary_directory_retained_process_exit_unconfirmed', 'unconfirmed'],
     ['cancelled', 'cancelled', 'cancelled', null, 'confirmed']
   ];
@@ -1330,7 +1489,9 @@ test('pelican runner classifies cancellation, invalid output and unconfirmed cle
             stdin: { end() { ready(); queueMicrotask(() => {
               if (mode === 'invalid-output') { child.stdout.emit('data', 'not-json'); child.emit('close', 0); }
               if (mode === 'incomplete-output') { child.stdout.emit('data', JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: '<svg/>' } })); child.emit('close', 0); }
-              if (mode === 'oversized-output') { child.stdout.emit('data', JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'a'.repeat(256 * 1024 + 1) } })); child.emit('close', 0); }
+              // A complete JSONL line is required before the answer budget can be judged,
+              // so the fixture terminates its line the way the real CLI does.
+              if (mode === 'oversized-output') { child.stdout.emit('data', JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'a'.repeat(MAX_ANSWER + 1) } }) + String.fromCharCode(10)); child.emit('close', 0); }
               if (mode === 'cancelled') controller.abort();
             }); } },
             kill() { kills++; this.emit('close', null, 'SIGKILL'); }
@@ -1413,4 +1574,85 @@ test('pelican service copies only allowlisted diagnostics from arbitrary runner 
   assert.equal(item.diagnostics.configWarning, 'timeout_config_invalid');
   assert.equal(JSON.stringify(state).includes('private-secret'), false);
   assert.equal(JSON.stringify(state).includes('nested'), false);
+});
+
+test('zero-output stall stops as upstream_stalled when no item ever arrives', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'runner-stalled-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  // 报告 5.1 的 #3：两次中转挂死是「零输出」形态，CLI 把它报成可恢复的
+  // Reconnecting 提示，所以没有任何既有分支会停掉进程，只能靠 errorEventCount
+  // 累积到 2 且 outputStarted 仍为 false 才敢判定上游已死。
+  const line = value => JSON.stringify(value) + String.fromCharCode(10);
+  const runner = createRunner({ tempRoot: root, spawnImpl: () => {
+    const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: { end() { queueMicrotask(() => {
+      child.stdout.emit('data', line({ type: 'thread.started', thread_id: 'thread' }));
+      child.stdout.emit('data', line({ type: 'error', message: 'Reconnecting... 1/5 (stream disconnected before completion: origin did not respond)' }));
+      child.stdout.emit('data', line({ type: 'error', message: 'Reconnecting... 2/5 (stream disconnected before completion: origin did not respond)' }));
+      // 刻意不发 close：挂死的真实形态就是进程一直活着，却再也不吐任何 item.*。
+    }); } }, kill() { this.emit('close', null, 'SIGKILL'); } });
+    return child;
+  } });
+  await assert.rejects(runner.runCase({ caseDef: CASES[0] }), error => {
+    assert.equal(error.code, 'upstream_stalled');
+    assert.equal(error.message, 'upstream_stalled');
+    assert.equal(error.diagnostics.errorEventCount, 2);
+    assert.equal(error.diagnostics.lastErrorClass, 'reconnect_notice');
+    assert.equal(error.diagnostics.lastPhase, 'stopping');
+    // 上游挂死不是本机的进程问题，归因沿用既有的工艺错误分类，不外扩诊断枚举。
+    assert.equal(error.diagnostics.terminationReason, 'process_error');
+    return true;
+  });
+});
+
+test('a run that already produced output survives a burst of recoverable errors', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'runner-stall-guard-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  // 回归保护：报告 5.1 的 #4 在首次报错前就已经有输出，事后还有 287.7s 静默仍然成功。
+  // 看门狗唯一认的证据是「从没出过字」，一旦产过 reasoning/agent_message 就永久失活，
+  // 否则一次先报错、后恢复的运行会被误杀。
+  const line = value => JSON.stringify(value) + String.fromCharCode(10);
+  const runner = createRunner({ tempRoot: root, spawnImpl: () => {
+    const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: { end() { queueMicrotask(() => {
+      child.stdout.emit('data', line({ type: 'item.updated', item: { type: 'reasoning', text: 'thinking' } }));
+      for (const attempt of [1, 2, 3]) child.stdout.emit('data', line({ type: 'error', message: `Reconnecting... ${attempt}/5 (stream disconnected before completion: origin did not respond)` }));
+      child.stdout.emit('data', line({ type: 'item.completed', item: { type: 'agent_message', text: '<svg><!-- recovered --></svg>' } }));
+      child.stdout.emit('data', line({ type: 'turn.completed' }));
+      child.emit('close', 0);
+    }); } }, kill() { assert.fail('output already started, so the stall watchdog must not fire'); } });
+    return child;
+  } });
+  const result = await runner.runCase({ caseDef: CASES[0] });
+  assert.equal(result.answer, '<svg><!-- recovered --></svg>');
+  assert.equal(result.diagnostics.errorEventCount, 3);
+  assert.equal(result.diagnostics.terminationReason, 'completed');
+  assert.equal(result.diagnostics.exitCode, 0);
+});
+
+test('service retries an upstream stall once and keeps the stalled code visible', async () => {
+  const storeFor = (state) => ({ load: async () => {}, snapshot: async () => structuredClone(state), mutate: async fn => fn(state), close: async () => {} });
+  // 挂死此前只会以 timed_out 落地，而 timed_out 不可重试，等于重试机制对最常见的
+  // 失败形态完全空转。一次新尝试有机会拿到另一条中转线路，两次都挂就把码报出来。
+  const stalledState = { runs: [], reservations: {}, nextSeq: 1 };
+  const stalled = [];
+  const stalledService = await createBenchmarkService({ store: storeFor(stalledState), runner: { runCase: async () => { stalled.push('upstream_stalled'); throw Object.assign(new Error('private-secret'), { code: 'upstream_stalled' }); } } });
+  await stalledService.run({ requestId: 'stalled_request_123' });
+  await stalledService.close();
+  assert.deepEqual(stalled, ['upstream_stalled', 'upstream_stalled']);
+  assert.equal(stalledState.runs[0].status, 'failed');
+  assert.equal(stalledState.runs[0].caseResults[0].errorCode, 'upstream_stalled');
+  assert.equal(JSON.stringify(stalledState).includes('private-secret'), false);
+
+  // 首次挂死、重试拿到完整回答时必须记为成功，而不是把首次失败留在记录上。
+  const recoveredState = { runs: [], reservations: {}, nextSeq: 1 };
+  let attempts = 0;
+  const recovered = await createBenchmarkService({ store: storeFor(recoveredState), runner: { runCase: async () => {
+    attempts += 1;
+    if (attempts === 1) throw Object.assign(new Error('private-secret'), { code: 'upstream_stalled' });
+    return { answer: '<svg><!-- second route --></svg>', diagnostics: { lastPhase: 'waiting', terminationReason: 'completed' } };
+  } } });
+  await recovered.run({ requestId: 'stalled_recovered_request_123' });
+  await recovered.close();
+  assert.equal(attempts, 2);
+  assert.equal(recoveredState.runs[0].status, 'completed');
+  assert.equal(recoveredState.runs[0].caseResults[0].answer, '<svg><!-- second route --></svg>');
 });

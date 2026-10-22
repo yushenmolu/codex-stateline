@@ -126,7 +126,7 @@ Assert ($null -ne $r.Image -and -not $r.Image.Drawing.Children[1].Children[0].Ch
 # Exact HTTP whitelist: status/message/substring must never smuggle diagnostics.
 $handler=New-Object NativeFixtureHandler;$handler.Mode=6
 $client=New-Object CodexNative.WidgetClient $false,$handler; $clients.Add($client)
-foreach($code in 'authentication_failed','rate_limited','model_unavailable','process_failed','timed_out','score_invalid','service_unavailable','benchmark_unavailable','run_active','nonce_invalid','request_id_conflict') {
+foreach($code in 'authentication_failed','rate_limited','model_unavailable','process_failed','upstream_stream_lost','upstream_stalled','timed_out','score_invalid','service_unavailable','benchmark_unavailable','run_active','nonce_invalid','request_id_conflict') {
     $handler.ErrorCode=$code
     $task=$client.RequestAsync('/api/telemetry',$null,262144,1000);PumpUntil {$task.IsCompleted}
     Assert ($task.IsFaulted -and $task.Exception.InnerException.Code -ceq $code) "HTTP whitelist failed: $code"
@@ -264,7 +264,8 @@ Assert ($mainButtons.Count -eq 5 -and @($mainButtons | Where-Object {-not $_.Foc
 foreach($button in $mainButtons){Assert ($null -ne $button.Template.FindName('FocusRing',$button) -and $null -ne $button.Template.FindName('Interaction',$button)) 'button focus or interaction feedback missing'}
 $usageEntry=@($mainButtons | Where-Object {[Windows.Automation.AutomationProperties]::GetAutomationId($_) -ceq 'Usage'})[0]
 $usageEntryStack=$usageEntry.Parent
-Assert ($usageEntry.Content.ToString() -ceq '用量统计 ↗' -and $usageEntryStack -is [Windows.Controls.StackPanel] -and [object]::ReferenceEquals($usageEntryStack.Children[$usageEntryStack.Children.Count-1],$usageEntry)) 'usage entry is missing from the bottom of the main body'
+$usageFooter=$usageEntryStack.Parent
+Assert ($usageEntry.Content.ToString() -ceq '用量统计 ↗' -and $usageEntryStack -is [Windows.Controls.Grid] -and [object]::ReferenceEquals($usageEntryStack.Children[$usageEntryStack.Children.Count-1],$usageEntry) -and $usageFooter -is [Windows.Controls.StackPanel] -and [object]::ReferenceEquals($usageFooter.Children[$usageFooter.Children.Count-1],$usageEntryStack)) 'usage entry is missing from the bottom of the main body'
 Assert ($null -eq $window.UsageWindow -and @(Visuals $window | Where-Object {[Windows.Automation.AutomationProperties]::GetAutomationId($_) -like 'Local*' -or [Windows.Automation.AutomationProperties]::GetAutomationId($_) -in @('UsageBarChart','UsageRangeSlider') -or $_ -is [Windows.Controls.Slider]}).Count -eq 0) 'main window contains the local usage surface or opened its window eagerly'
 $taskSelector=$window.TaskControl
 $selectedLabel=$taskSelector.Template.FindName('ContentSite',$taskSelector)
@@ -303,9 +304,9 @@ $nextRunModels.SelectedValue='example-provider/deepseek-v4.1-flash'
 Assert ($nextRunSummaryControl.Text -match 'example-provider/deepseek-v4\.1-flash' -and $nextRunSummaryControl.Text -match '当前配置' -and $nextRunSummaryControl.Text -match 'Cockpit') 'summary lagged behind the model switch'
 Assert ([string]$nextRunModels.ToolTip -ceq 'example-provider/deepseek-v4.1-flash' -and [Windows.Automation.AutomationProperties]::GetHelpText($nextRunModels) -ceq '模型 example-provider/deepseek-v4.1-flash') 'model tooltip or accessible value lagged behind the switch'
 $nextRunEfforts.SelectedValue='high'
-Assert ($nextRunSummaryControl.Text -match '高' -and $nextRunSummaryControl.Text -match 'example' -and $nextRunSummaryControl.Text -match 'Cockpit') 'summary lagged behind the effort switch'
+Assert ($nextRunSummaryControl.Text -match 'high' -and $nextRunSummaryControl.Text -match 'example' -and $nextRunSummaryControl.Text -match 'Cockpit') 'summary lagged behind the effort switch'
 Assert ([string]$nextRunEfforts.ToolTip -ceq 'high' -and [Windows.Automation.AutomationProperties]::GetHelpText($nextRunEfforts) -ceq '推理强度 high') 'effort tooltip or accessible value lagged behind the switch'
-Assert (@($nextRunModes.ItemsSource).Count -eq 1 -and $nextRunModes.SelectedValue -ceq 'cockpit' -and $nextRunSummaryControl.Text -match 'Cockpit' -and $nextRunSummaryControl.Text -match '高' -and $nextRunSummaryControl.Text -match 'example') 'next-run controls exposed a removed mode or lost the Cockpit summary'
+Assert (@($nextRunModes.ItemsSource).Count -eq 1 -and $nextRunModes.SelectedValue -ceq 'cockpit' -and $nextRunSummaryControl.Text -match 'Cockpit' -and $nextRunSummaryControl.Text -match 'high' -and $nextRunSummaryControl.Text -match 'example') 'next-run controls exposed a removed mode or lost the Cockpit summary'
 Assert ([string]$nextRunModes.ToolTip -ceq 'cockpit' -and [Windows.Automation.AutomationProperties]::GetHelpText($nextRunModes) -ceq '作品形式 Cockpit 网页动画') 'Cockpit tooltip or accessible mode is incorrect'
 # Switching a value back must land on the final value too, not the previous one.
 $nextRunModels.SelectedValue='configured'
@@ -353,9 +354,9 @@ Assert ($settingsModels.IsKeyboardFocused -and $settingsModels.SelectedValue -ce
 $settingsModeChoices=@($settingsModes.ItemsSource)
 Assert ($settingsModeChoices.Count -eq 1 -and $settingsModeChoices[0].Value -ceq 'cockpit' -and $settingsModeChoices[0].Enabled -and $settingsModes.SelectedValue -ceq 'cockpit') 'settings did not expose only the available Cockpit mode'
 $settingsModels.SelectedValue='example-provider/deepseek-v4.1-flash';$settingsEfforts.SelectedValue='high'
-Assert ($window.ModelControl.SelectedValue -ceq 'example-provider/deepseek-v4.1-flash' -and $nextRunEfforts.SelectedValue -ceq 'high' -and $window.ModeControl.SelectedValue -ceq 'cockpit' -and $nextRunSummaryControl.Text -match 'example' -and $nextRunSummaryControl.Text -match '高' -and $nextRunSummaryControl.Text -match 'Cockpit' -and $settingsSummary.Text -ceq $nextRunSummaryControl.Text) 'settings draft did not synchronize to the main controls or summaries'
+Assert ($window.ModelControl.SelectedValue -ceq 'example-provider/deepseek-v4.1-flash' -and $nextRunEfforts.SelectedValue -ceq 'high' -and $window.ModeControl.SelectedValue -ceq 'cockpit' -and $nextRunSummaryControl.Text -match 'example' -and $nextRunSummaryControl.Text -match 'high' -and $nextRunSummaryControl.Text -match 'Cockpit' -and $settingsSummary.Text -ceq $nextRunSummaryControl.Text) 'settings draft did not synchronize to the main controls or summaries'
 $nextRunModels.SelectedValue='configured';$nextRunEfforts.SelectedValue='medium';$nextRunModes.SelectedValue='cockpit'
-Assert ($settingsModels.SelectedValue -ceq 'configured' -and $settingsEfforts.SelectedValue -ceq 'medium' -and $settingsModes.SelectedValue -ceq 'cockpit' -and $settingsSummary.Text -match '当前配置' -and $settingsSummary.Text -match '中' -and $settingsSummary.Text -match 'Cockpit') 'main draft changes did not synchronize back to settings'
+Assert ($settingsModels.SelectedValue -ceq 'configured' -and $settingsEfforts.SelectedValue -ceq 'medium' -and $settingsModes.SelectedValue -ceq 'cockpit' -and $settingsSummary.Text -match '当前配置' -and $settingsSummary.Text -match 'medium' -and $settingsSummary.Text -match 'Cockpit') 'main draft changes did not synchronize back to settings'
 $nextRunEfforts.SelectedValue='configured'
 $settingsHeaderButton=$window.GetType().GetField('settingsHeaderButton',$flags).GetValue($window)
 Click $settingsClose[0]
@@ -385,7 +386,7 @@ $window.FixtureEvent('history',$null,'{"status":"idle","activeRun":null,"latestR
 Assert ($window.BenchState -match '尚未运行' -and $null -eq $window.SelectedRunId) 'idle history dishonest'
 $window.FixtureEvent('history',$null,$null)
 Assert ($window.BenchState -eq '历史不可用') 'null history dishonest'
-foreach($code in 'authentication_failed','rate_limited','model_unavailable','process_failed','timed_out','spawn_failed','malformed_output','private-secret diagnostics') {
+foreach($code in 'authentication_failed','rate_limited','model_unavailable','process_failed','upstream_stream_lost','upstream_stalled','timed_out','spawn_failed','malformed_output','private-secret diagnostics') {
     $record=@{runId='failed-fixture';status='failed';model='configured';caseResults=@(@{caseId='pelican-svg';status='failed';errorCode=$code;diagnostics='private-secret'})}
     $window.FixtureEvent('history',$null,([CodexNative.WidgetClient]::Serialize(@{latestRun=$record;activeRun=$null;runs=@($record)})))
     $window.ResultsWindow.UpdateLayout()
@@ -469,6 +470,8 @@ $window.FixtureAcceptRun=$true;$window.FixtureRun()
 Assert ($requestField.GetValue($window) -ne 'prior-cancellable-request' -and $window.IsBusy) 'accepted run did not register identity/state'
 $window.FixtureEvent('run','run_active',$null)
 Assert ([CodexNative.WidgetClient]::ErrorDescription('authentication_failed') -match '中转配置凭据') 'auth message omitted relay credentials'
+Assert ([CodexNative.WidgetClient]::ErrorDescription('upstream_stream_lost') -match '上游' -and [CodexNative.WidgetClient]::ErrorDescription('upstream_stream_lost') -notmatch '本地运行环境') 'lost upstream stream blamed the local machine'
+Assert ([CodexNative.WidgetClient]::ErrorDescription('upstream_stalled') -match '上游' -and [CodexNative.WidgetClient]::ErrorDescription('upstream_stalled') -notmatch '本地运行环境') 'stalled upstream run blamed the local machine'
 # Inspect real comparison TextBlock content, including configured baseline with explicit selection.
 ResetTelemetryFixture $window
 $window.SetFixture();$window.FixtureEvent('history',$null,([CodexNative.WidgetClient]::Serialize($window.GetType().GetField('snapshot',$flags).GetValue($window))))
@@ -820,6 +823,7 @@ Assert ([object]::ReferenceEquals($previewRequestBefore,$window.SubmittedRequest
 $target=WindowField 'cockpitTarget';$live=WindowField 'fixturePreviewSnapshot';$operation=[long]$live.OperationGeneration
 Assert ((WindowField 'htmlIntent') -and (PreviewField $target 'Presentation').ToString() -ceq 'Inline' -and (PreviewField $target 'CaptureFrames') -and (PreviewField $target 'ContentDigest') -match '^[a-f0-9]{64}$') 'ready history did not authorize inline capture without a second Results click'
 Assert ((WindowField 'cockpitMessage').Text -ceq '正在加载动画预览…' -and $null -eq $cockpitImage.Source) 'Cockpit loading state missing'
+Assert ($null -eq (WindowField 'cockpitLoadClock')) 'fixture preview armed the load watchdog'
 Assert (-not (BeginCockpitClick 0 0) -and $null -eq (WindowField 'cockpitShownTarget')) 'loading accepted artwork input'
 $redBytes=FrameBytes 255 0;$blueBytes=FrameBytes 0 255
 $redFrame=FixtureFrame $target $operation 1 $redBytes
@@ -1077,6 +1081,24 @@ Assert ($null -eq (WindowField 'cockpitImage').Source -and -not (WindowField 'ht
 $failedSchedules=[long](WindowField 'fixturePreviewScheduleCount')
 for($repeat=0;$repeat -lt 3;$repeat++){$cockpitRun.caseResults[0].scores.correctness=2+$repeat;HistoryFixture $null $cockpitRun @($cockpitRun)}
 Assert (-not (WindowField 'htmlIntent') -and [long](WindowField 'fixturePreviewScheduleCount') -eq $failedSchedules -and $null -eq (WindowField 'cockpitShownTarget')) 'invalid encoded frame was retried by ordinary polling'
+# 首帧始终不来时必须给出明确失败，而不是无限停在「正在加载动画预览…」。
+$loadField=$window.GetType().GetField('cockpitLoadClock',$allFields);$budgetField=$window.GetType().GetField('cockpitLoadBudgetMs',$allFields);$savedBudget=$budgetField.GetValue($window)
+$open=@($casePanel.Children|Where-Object {$_ -is [Windows.Controls.Button] -and [Windows.Automation.AutomationProperties]::GetAutomationId($_) -eq 'OpenHtmlPreview'})[0];Click $open
+$target=WindowField 'cockpitTarget';$operation=[long](WindowField 'fixturePreviewSnapshot').OperationGeneration
+Assert ((WindowField 'htmlIntent') -and (WindowField 'cockpitMessage').Text -ceq '正在加载动画预览…' -and $null -eq $cockpitImage.Source) 'watchdog fixture did not reach the loading state'
+$loadClock=New-Object Diagnostics.Stopwatch;$loadClock.Start();$loadField.SetValue($window,$loadClock);$null=InvokeWindow 'CheckCockpitLoad'
+Assert ((WindowField 'htmlIntent') -and [object]::ReferenceEquals($loadClock,$loadField.GetValue($window))) 'load watchdog fired before its budget elapsed'
+$budgetField.SetValue($window,0);$null=InvokeWindow 'CheckCockpitLoad'
+Assert (-not (WindowField 'htmlIntent') -and $null -eq $loadField.GetValue($window) -and (WindowField 'cockpitMessage').Text -match '动画预览加载超时' -and $null -eq $cockpitImage.Source -and $null -eq (WindowField 'cockpitShownTarget')) 'load watchdog did not fail visibly'
+$timeoutSchedules=[long](WindowField 'fixturePreviewScheduleCount')
+for($repeat=0;$repeat -lt 3;$repeat++){$cockpitRun.caseResults[0].scores.correctness=2+$repeat;HistoryFixture $null $cockpitRun @($cockpitRun)}
+Assert (-not (WindowField 'htmlIntent') -and [long](WindowField 'fixturePreviewScheduleCount') -eq $timeoutSchedules -and (WindowField 'cockpitMessage').Text -match '动画预览加载超时') 'load timeout was retried by ordinary polling'
+$budgetField.SetValue($window,$savedBudget)
+Click $open;$target=WindowField 'cockpitTarget';$operation=[long](WindowField 'fixturePreviewSnapshot').OperationGeneration
+$loadClock=New-Object Diagnostics.Stopwatch;$loadClock.Start();$loadField.SetValue($window,$loadClock)
+ApplyFrame (FixtureFrame $target $operation 1 $redBytes)
+Assert ($null -ne $cockpitImage.Source -and $null -eq $loadField.GetValue($window)) 'a delivered frame did not disarm the load watchdog'
+$null=InvokeWindow 'StopHtml'
 foreach($errorCode in 'source_unavailable','source_identity_mismatch','source_digest_mismatch','source_html_ambiguous','guard_environment_unavailable','preview_capture_failed','preview_input_failed','capability_missing','edge_not_found','cleanup_failed','unknown-private-secret'){
     $schedulesBeforeReload=[long](WindowField 'fixturePreviewScheduleCount');$open=@($casePanel.Children|Where-Object {$_ -is [Windows.Controls.Button] -and [Windows.Automation.AutomationProperties]::GetAutomationId($_) -eq 'OpenHtmlPreview'})[0];Click $open
     $target=WindowField 'cockpitTarget';$operation=[long](WindowField 'fixturePreviewSnapshot').OperationGeneration
@@ -1356,23 +1378,34 @@ foreach($control in @($window.TaskControl,$taskPinButton,$mainContext,$mainEffor
     Assert ($control.IsVisible -and $origin.X -ge 0 -and $origin.Y -ge 0 -and $origin.X+$control.ActualWidth -le $window.ActualWidth+1 -and $origin.Y+$control.ActualHeight -le $window.ActualHeight+1) 'main data or action extends beyond the fixed window'
 }
 $totalMetric=$window.MetricControls[2]
-Assert ($totalMetric.FontSize -eq 28 -and $window.MetricControls[0].FontSize -eq 17 -and $totalMetric.FontSize -gt $window.MetricControls[0].FontSize -and $totalMetric.FontWeight -eq [Windows.FontWeights]::SemiBold -and $window.MetricControls[0].FontWeight -eq [Windows.FontWeights]::Medium) 'total usage lost its 28px semibold emphasis over 17px input/output'
+Assert ($totalMetric.FontSize -eq 28 -and $window.MetricControls[0].FontSize -eq 13 -and $totalMetric.FontSize -gt $window.CacheHitRateControl.FontSize -and $window.CacheHitRateControl.FontSize -gt $window.MetricControls[0].FontSize -and $totalMetric.FontWeight -eq [Windows.FontWeights]::SemiBold -and $window.MetricControls[0].FontWeight -eq [Windows.FontWeights]::Medium) 'total usage lost its 28px semibold emphasis over the 13px input/output support layer'
+$liveNumeric=@($totalMetric,$window.CacheHitRateControl,$window.MetricControls[0],$window.MetricControls[1],$window.MetricControls[3])
+Assert (@($liveNumeric | Where-Object {[Windows.Documents.Typography]::GetNumeralAlignment($_) -ne [Windows.FontNumeralAlignment]::Tabular -or $_.TextAlignment -ne [Windows.TextAlignment]::Right -or $_.MinWidth -le 0}).Count -eq 0) 'live numeric values are not tabular, right aligned or width bounded; counts would jump on refresh'
+Assert ($window.CacheHitRateCaptionControl.FontSize -eq 11 -and [Math]::Abs($window.MetricControls[3].FontSize-$window.MetricControls[0].FontSize) -eq 0) 'secondary labels or support numbers broke the five step type ladder'
+$lastRequestLine=$window.LastRequestControl
+Assert ($lastRequestLine.FontSize -eq 11 -and $lastRequestLine.Foreground -ne $window.MetricControls[0].Foreground -and $lastRequestLine.TextAlignment -ne $window.MetricControls[0].TextAlignment) 'last request row shares size, colour or alignment with the numbers it labels'
 $totalCell=[Windows.Media.VisualTreeHelper]::GetParent($totalMetric)
-$selectedBody=[Windows.Media.VisualTreeHelper]::GetParent($totalCell)
+$selectedSplit=[Windows.Media.VisualTreeHelper]::GetParent($totalCell)
+$selectedHero=[Windows.Media.VisualTreeHelper]::GetParent($selectedSplit)
+$selectedBody=[Windows.Media.VisualTreeHelper]::GetParent($selectedHero)
 $selectedCard=[Windows.Media.VisualTreeHelper]::GetParent($selectedBody)
 $selectedSurface=[Windows.Media.VisualTreeHelper]::GetParent($selectedCard)
 $selectedHost=[Windows.Media.VisualTreeHelper]::GetParent($selectedSurface)
-Assert ($totalCell -is [Windows.Controls.StackPanel] -and $selectedCard -is [Windows.Controls.Grid] -and $selectedSurface -is [Windows.Controls.Border] -and [object]::ReferenceEquals($selectedHost,$window.GetType().GetField('metricsGrid',$flags).GetValue($window))) 'selected usage card left its own metrics surface'
+Assert ($totalCell -is [Windows.Controls.StackPanel] -and $selectedSplit -is [Windows.Controls.Grid] -and $selectedHero -is [Windows.Controls.Border] -and $selectedCard -is [Windows.Controls.Grid] -and $selectedSurface -is [Windows.Controls.Border] -and [object]::ReferenceEquals($selectedHost,$window.GetType().GetField('metricsGrid',$flags).GetValue($window))) 'selected usage card left its own metrics surface'
 $window.OpenUsage();$window.UsageWindow.UpdateLayout()
 $overallMetric=$window.OverallMetricControls[2]
 $overallCell=[Windows.Media.VisualTreeHelper]::GetParent($overallMetric)
-$overallBody=[Windows.Media.VisualTreeHelper]::GetParent($overallCell)
+$overallSplit=[Windows.Media.VisualTreeHelper]::GetParent($overallCell)
+$overallHero=[Windows.Media.VisualTreeHelper]::GetParent($overallSplit)
+$overallBody=[Windows.Media.VisualTreeHelper]::GetParent($overallHero)
 $overallCard=[Windows.Media.VisualTreeHelper]::GetParent($overallBody)
 $overallChartPanel=[Windows.Media.VisualTreeHelper]::GetParent($overallCard)
 $overallSurface=[Windows.Media.VisualTreeHelper]::GetParent($overallChartPanel)
-Assert ($overallCell -is [Windows.Controls.StackPanel] -and $overallCard -is [Windows.Controls.Grid] -and $overallChartPanel -is [Windows.Controls.StackPanel] -and $overallSurface -is [Windows.Controls.Border] -and -not [object]::ReferenceEquals($overallSurface,$selectedSurface) -and [object]::ReferenceEquals([Windows.Window]::GetWindow($overallMetric),$window.UsageWindow)) 'local total usage did not render in its independent window card'
+Assert ($overallCell -is [Windows.Controls.StackPanel] -and $overallSplit -is [Windows.Controls.Grid] -and $overallHero -is [Windows.Controls.Border] -and $overallCard -is [Windows.Controls.Grid] -and $overallChartPanel -is [Windows.Controls.StackPanel] -and $overallSurface -is [Windows.Controls.Border] -and -not [object]::ReferenceEquals($overallSurface,$selectedSurface) -and [object]::ReferenceEquals([Windows.Window]::GetWindow($overallMetric),$window.UsageWindow)) 'local total usage did not render in its independent window card'
 $selectedHostControl=$window.GetType().GetField('metricsGrid',$flags).GetValue($window)
 Assert ($selectedHostControl.MinHeight -ge 84 -and [Math]::Abs($selectedHostControl.ActualHeight-$selectedHostControl.MinHeight) -le 60) 'selected usage card height is outside its layout budget'
+Assert ($selectedHero.CornerRadius.TopLeft -eq $selectedSurface.CornerRadius.TopLeft -and $selectedHero.Margin.Left -eq 0 -and $selectedHero.Margin.Right -eq 0) 'hero capsule is inset from the card or its radius is larger than the card it sits in'
+Assert ($window.GetType().GetField('status',$flags).GetValue($window).FontSize -eq 11 -and $window.GetType().GetField('taskFlags',$flags).GetValue($window).FontSize -eq 11) 'warning text is not at the single 11px size both slots now share'
 # A telemetry disconnect preserves validated information but exposes source health separately.
 $window.FixtureTaskTelemetry($generation,'disconnected',$null)
 Assert ($window.DisplayState -match '本地服务断连') 'task telemetry disconnect lost the single main status'
@@ -1441,7 +1474,7 @@ InfoListUpdate
 InfoSampleApply
 $infoGeneration=$window.TaskGeneration
 Assert (-not $window.TaskFlagsVisible) 'fresh list and fresh task displayed warnings'
-Assert (([regex]::Matches((VisibleUiText $window),'当前对话 · 会话累计（日志）')).Count -eq 1 -and (VisibleUiText $window) -notmatch '会话消耗 · tokens') 'legacy conversation caption missing, duplicated or mislabeled as a selected aggregate'
+Assert (([regex]::Matches((VisibleUiText $window),'当前对话 · 会话累计 · 历史日志 · 非实时')).Count -eq 1 -and (VisibleUiText $window) -notmatch '会话累计（日志）' -and (VisibleUiText $window) -notmatch '会话消耗 · tokens') 'legacy conversation caption missing, duplicated or mislabeled as a selected aggregate'
 Assert (([string]$window.MetricControls[0].ToolTip -ceq '输入 · 1234567 tokens') -and ([string]$window.MetricControls[2].ToolTip -ceq '合计 · 1234567 tokens')) 'exact invariant token tooltip missing on input/total'
 Assert ([Windows.Automation.AutomationProperties]::GetHelpText($window.MetricControls[2]) -match '1234567') 'accessible help lost the exact total count'
 Assert ($window.MetricControls[1].Text -ceq '0') 'real zero count was hidden or reformatted'
@@ -2143,17 +2176,59 @@ function ObservedLiveSample {
 }
 function ApplyLiveFixture($sample){$liveWindow.FixtureLive($true,$liveWindow.TaskGeneration,$null,([CodexNative.WidgetClient]::Serialize($sample)))}
 $liveWindow=New-Object CodexNative.WidgetWindow $true;$fixtureWindows.Add($liveWindow)
+$liveWindow.Show();$liveWindow.UpdateLayout()
 $liveSpeedCaption=$liveWindow.GetType().GetField('speedCaption',$allFields).GetValue($liveWindow)
 $liveWindow.FixtureLive($true,$liveWindow.TaskGeneration,'disconnected',$null)
 $liveWindow.FixtureTasks($tasksJson)
 $liveSample=LiveSample
 ApplyLiveFixture $liveSample
 Assert ($liveWindow.SelectedTask -ceq $taskAlpha -and -not $liveWindow.PinnedTask -and $liveWindow.MetricControls[2].Text -ceq '42' -and $liveWindow.SelectedUsageCaptionControl.Text -match '活动对话.*22222222.*会话累计') 'live identity borrowed the latest historical task or omitted confirmed scope'
-Assert ($liveWindow.ContextText -ceq '执行模型 · example-provider/gpt-6.1-sol' -and $liveWindow.EffortText -match 'ultra' -and $liveWindow.MetricControls[3].Text -ceq '2.0' -and $liveWindow.MetricControls[3].ToolTip -match '已确认请求' -and $liveSpeedCaption.Text -ceq '请求均速 token/s') 'live execution evidence or confirmed request speed did not render'
+Assert ($liveWindow.ContextText -ceq '执行模型 · example-provider/gpt-6.1-sol' -and $liveWindow.EffortText -ceq '推理强度 · ultra' -and $liveWindow.MetricControls[3].Text -ceq '2.0' -and $liveWindow.MetricControls[3].ToolTip -match '已确认请求' -and $liveSpeedCaption.Text -ceq '请求均速 token/s') 'live execution evidence or confirmed request speed did not render'
 Assert ($liveWindow.SelectedUsageCaptionControl.ToolTip -match '输入含缓存与多次请求的重复输入' -and $liveWindow.SelectedUsageCaptionControl.ToolTip -match '先前基线' -and $liveWindow.SelectedUsageCaptionControl.ToolTip -match '不等于本机扫描的已核实历史合计' -and $liveWindow.SelectedUsageCaptionControl.ToolTip -match '上下文占用或账户账单') 'live conversation cumulative tooltip omitted its accounting limits or unknown prior baseline'
+# 缓存命中率（cachedInputTokens / inputTokens）是 live 卡片的附加指标：缺失时必须保持未知而不是拒收快照。
+$liveCacheRate=$liveWindow.CacheHitRateControl;$liveCacheCaption=$liveWindow.CacheHitRateCaptionControl
+Assert ($null -ne $liveCacheRate -and $null -ne $liveCacheCaption -and $liveCacheRate.Visibility -eq [Windows.Visibility]::Visible -and $liveCacheCaption.Text -ceq '缓存命中率') 'live cache hit rate element is missing, hidden or mislabelled'
+Assert ($liveCacheRate.Text -ceq '—' -and [string]$liveCacheRate.ToolTip -match '缓存输入 / 输入' -and [string]$liveCacheRate.ToolTip -match '会话累计' -and [Windows.Automation.AutomationProperties]::GetHelpText($liveCacheRate) -ceq [string]$liveCacheRate.ToolTip) 'absent cachedInputTokens did not render a documented unknown'
+$cachedLive=LiveSample;$cachedLive.usage.cachedInputTokens=33
+ApplyLiveFixture $cachedLive
+Assert ($liveCacheRate.Text -ceq '82.5%' -and [string]$liveCacheRate.ToolTip -match '缓存输入 33 tokens' -and [string]$liveCacheRate.ToolTip -match '输入 40 tokens' -and [Windows.Automation.AutomationProperties]::GetHelpText($liveCacheRate) -ceq [string]$liveCacheRate.ToolTip) 'cached input did not render a one-decimal hit rate with its exact numerator and denominator'
+$cachedFull=LiveSample;$cachedFull.usage.cachedInputTokens=40
+ApplyLiveFixture $cachedFull
+Assert ($liveCacheRate.Text -ceq '100.0%') 'a fully cached conversation was not shown as 100.0%'
+foreach($badCached in @(-1,'33',1.5,41,$null)){
+ $rejectedCache=LiveSample
+ if($null -eq $badCached){$rejectedCache.usage.cachedInputTokens=$null}else{$rejectedCache.usage.cachedInputTokens=$badCached}
+ ApplyLiveFixture $rejectedCache
+ Assert ($liveWindow.MetricControls[2].Text -ceq '42' -and $liveCacheRate.Text -ceq '—') ('invalid cachedInputTokens rejected the whole live snapshot or invented a rate: '+[string]$badCached)
+}
+$zeroCachedLive=LiveSample;$zeroCachedLive.usage.inputTokens=0;$zeroCachedLive.usage.outputTokens=0;$zeroCachedLive.usage.totalTokens=0;$zeroCachedLive.usage.cachedInputTokens=0;$zeroCachedLive.speed.outputTokensPerSecond=0
+ApplyLiveFixture $zeroCachedLive
+Assert ($liveWindow.MetricControls[2].Text -ceq '0' -and $liveCacheRate.Text -ceq '—' -and [string]$liveCacheRate.ToolTip -match '输入为 0') 'zero-input conversation invented a hit rate instead of an explained unknown'
 $gatewayLive=LiveSample;$gatewayLive.source='magpie_gateway';$gatewayLive.usage.includesSubagents=$true;$gatewayLive.lifecycle.state='completed';$gatewayLive.lifecycle.completedAt=$gatewayLive.observedAt
 ApplyLiveFixture $gatewayLive
 Assert ($liveWindow.SelectedUsageStateControl.Text -match 'Magpie.*已完成' -and $liveWindow.SelectedUsageCaptionControl.ToolTip -match '包含已核实代理' -and $liveWindow.MetricControls[2].Text -ceq '42') 'confirmed gateway lifecycle or subagent scope did not render'
+# 「上轮请求」是单次请求口径，用户拿它和中转站的单条用量记录逐条对照。
+$liveLastRequest=$liveWindow.LastRequestControl
+Assert ($null -ne $liveLastRequest) 'live last-request element is missing'
+ApplyLiveFixture (LiveSample)
+Assert ($liveLastRequest.Text -ceq '上轮请求 · —' -and [string]$liveLastRequest.ToolTip -match '上游未提供有效的最近一次请求计数' -and [Windows.Automation.AutomationProperties]::GetHelpText($liveLastRequest) -ceq [string]$liveLastRequest.ToolTip) 'absent last counters did not render a documented unknown'
+$lastLive=LiveSample;$lastLive.usage.last=@{inputTokens=30;outputTokens=1;totalTokens=31;cachedInputTokens=20}
+ApplyLiveFixture $lastLive
+Assert ($liveLastRequest.Text -ceq '上轮请求 · 新输入 10 · 缓存 20 · 输出 1' -and [string]$liveLastRequest.ToolTip -match '缓存输入 20 tokens' -and [string]$liveLastRequest.ToolTip -match '新输入 10 tokens' -and [string]$liveLastRequest.ToolTip -match '合计 31 tokens') ('last request counters did not render their decomposition: '+$liveLastRequest.Text)
+foreach($badLastCached in @(-1,'20',1.5,31)){
+ $badLast=LiveSample;$badLast.usage.last=@{inputTokens=30;outputTokens=1;totalTokens=31;cachedInputTokens=$badLastCached}
+ ApplyLiveFixture $badLast
+ Assert ($liveWindow.MetricControls[2].Text -ceq '42' -and $liveLastRequest.Text -ceq '上轮请求 · 新输入 — · 缓存 — · 输出 1') ('invalid last cached count rejected the snapshot or invented a decomposition: '+[string]$badLastCached)
+}
+$contradictoryLast=LiveSample;$contradictoryLast.usage.last=@{inputTokens=30;outputTokens=1;totalTokens=99;cachedInputTokens=20}
+ApplyLiveFixture $contradictoryLast
+Assert ($liveLastRequest.Text -ceq '上轮请求 · —' -and $liveWindow.MetricControls[0].Text -ceq '40' -and $liveWindow.MetricControls[1].Text -ceq '2' -and $liveWindow.MetricControls[2].Text -ceq '42') 'contradictory last counters voided the whole snapshot instead of only the last request'
+$finishedLive=LiveSample;$finishedLive.lifecycle.state='completed';$finishedLive.lifecycle.completedAt=$finishedLive.observedAt;$finishedLive.usage.cachedInputTokens=33;$finishedLive.usage.last=@{inputTokens=30;outputTokens=1;totalTokens=31;cachedInputTokens=20}
+ApplyLiveFixture $finishedLive
+Assert ($liveWindow.SelectedUsageStateControl.Text -match '已完成' -and $liveWindow.MetricControls[2].Text -ceq '42' -and $liveCacheRate.Text -ceq '82.5%' -and $liveLastRequest.Text -ceq '上轮请求 · 新输入 10 · 缓存 20 · 输出 1') 'a finished conversation blanked its confirmed data instead of keeping it labelled completed'
+Assert ([string]::IsNullOrEmpty($liveWindow.DisplayState)) 'a healthy live sample still printed a duplicate alert above the live card'
+Assert ($liveWindow.SelectedUsageStateControl.Foreground -ne $totalMetric.Foreground) 'an unavailable live state was painted with the same ink as the numbers'
+Assert ($liveWindow.MainViewport.ViewportHeight -gt 0 -and $liveWindow.MainViewport.ScrollableHeight -le 1) ('the live card with cache rate and last request no longer fits the 380x320 window: viewport='+$liveWindow.MainViewport.ViewportHeight+' extent='+$liveWindow.MainViewport.ExtentHeight+' scrollable='+$liveWindow.MainViewport.ScrollableHeight)
 ApplyLiveFixture (LiveSample)
 $liveOverall=UsageBlock 'local_all' 'available' $null @{inputTokens=100;outputTokens=200;totalTokens=300} $null
 $liveSelected=UsageBlock 'selected_task' 'available' $null @{inputTokens=900;outputTokens=99;totalTokens=999} $taskAlpha

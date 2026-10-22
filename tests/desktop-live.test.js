@@ -12,6 +12,7 @@ const NOW = Date.parse('2026-10-18T04:00:00.000Z');
 const PRIVATE = 'PRIVATE_BODY_AND_CREDENTIAL_MARKER';
 const MODEL = 'example-provider/gpt-6.1-sol';
 const USAGE = { inputTokens: 100, outputTokens: 20, totalTokens: 120 };
+const LAST = { inputTokens: 5, outputTokens: 3, totalTokens: 8 };
 const timerContexts = new WeakSet();
 
 function frame(value) {
@@ -119,7 +120,7 @@ function setup(t, options = {}, { telemetry = false } = {}) {
       const id = envelope.id ?? THREAD;
       s.state({ type: 'snapshot', revision, conversationState: {
         id, source: 'cli', threadRuntimeStatus: { type: 'active', activeFlags: [] },
-        latestTokenUsageInfo: { total: USAGE, last: { inputTokens: 5, outputTokens: 3, totalTokens: 8 }, modelContextWindow: 200_000 },
+        latestTokenUsageInfo: { total: USAGE, last: LAST, modelContextWindow: 200_000 },
         ...value,
       } }, envelope);
       s.flush();
@@ -187,7 +188,7 @@ test('exact pins discover an owner and accept only its matching thread, host and
   assert.equal(s.conversations.length, 1);
   assert.equal(s.conversations[0].threadId, THREAD);
   assert.equal(s.conversations[0].primary, true);
-  assert.deepEqual(s.conversations[0].usage, USAGE);
+  assert.deepEqual(s.conversations[0].usage, { ...USAGE, last: LAST });
   s.snapshot(4, { latestTokenUsageInfo: { total: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } } });
   assert.equal(s.conversations.length, 1);
 });
@@ -301,10 +302,89 @@ test('full desktop snapshots project only metadata and use thread totals without
       last: { inputTokens: 5, outputTokens: 3, totalTokens: 8 }, modelContextWindow: 200_000, secret: PRIVATE },
   });
   assert.deepEqual(s.conversations, [{
-    type: 'conversation', threadId: THREAD, primary: true, state: 'active', usage: USAGE,
+    type: 'conversation', threadId: THREAD, primary: true, state: 'active',
+    usage: { ...USAGE, cachedInputTokens: 90, reasoningOutputTokens: 10, last: LAST },
     model: MODEL, reasoningEffort: 'ultra', observedAt: new Date(NOW).toISOString(),
   }]);
   assert.equal(JSON.stringify({ events: s.events, statuses: s.statuses, outgoing: s.peer.messages }).includes(PRIVATE), false);
+});
+
+test('optional cache counters survive both snapshots and single-field patches', (t) => {
+  const s = setup(t);
+  s.ready(THREAD); s.owner();
+  const cached = { ...USAGE, cachedInputTokens: 90, reasoningOutputTokens: 10 };
+  s.snapshot(1, { latestTokenUsageInfo: { total: cached } });
+  assert.deepEqual(s.conversations.at(-1).usage, cached);
+  s.state({ type: 'patches', baseRevision: 1, revision: 2, patches: [
+    { op: 'replace', path: ['latestTokenUsageInfo', 'total', 'cachedInputTokens'], value: 70 },
+    { op: 'replace', path: ['latestTokenUsageInfo', 'total', 'reasoningOutputTokens'], value: 5 },
+  ] });
+  assert.deepEqual(s.conversations.at(-1).usage, { ...USAGE, cachedInputTokens: 70, reasoningOutputTokens: 5 });
+  // A whole-total replacement goes through the same optional-field policy.
+  s.state({ type: 'patches', baseRevision: 2, revision: 3, patches: [
+    { op: 'replace', path: ['latestTokenUsageInfo', 'total'], value: { ...USAGE, cachedInputTokens: 0, reasoningOutputTokens: 0 } },
+  ] });
+  assert.deepEqual(s.conversations.at(-1).usage, { ...USAGE, cachedInputTokens: 0, reasoningOutputTokens: 0 });
+});
+
+test('unusable cache counters are dropped without voiding the confirmed usage', (t) => {
+  const s = setup(t);
+  s.ready(THREAD); s.owner();
+  for (const [revision, extra, expected] of [
+    [1, { cachedInputTokens: -5 }, USAGE],
+    [2, { cachedInputTokens: 101 }, USAGE],
+    [3, { cachedInputTokens: '90', reasoningOutputTokens: 1.5 }, USAGE],
+    [4, {}, USAGE],
+    [5, { cachedInputTokens: -5, reasoningOutputTokens: 10 }, { ...USAGE, reasoningOutputTokens: 10 }],
+  ]) {
+    s.snapshot(revision, { latestTokenUsageInfo: { total: { ...USAGE, ...extra } } });
+    assert.deepEqual(s.conversations.at(-1).usage, expected, JSON.stringify(extra));
+  }
+  s.snapshot(6, { latestTokenUsageInfo: { total: { ...USAGE, cachedInputTokens: USAGE.inputTokens } } });
+  assert.deepEqual(s.conversations.at(-1).usage, { ...USAGE, cachedInputTokens: USAGE.inputTokens });
+  s.state({ type: 'patches', baseRevision: 6, revision: 7, patches: [
+    { op: 'replace', path: ['latestTokenUsageInfo', 'total', 'cachedInputTokens'], value: -1 },
+  ] });
+  assert.deepEqual(s.conversations.at(-1).usage, USAGE);
+  assert.equal(JSON.stringify(s.events).includes(PRIVATE), false);
+});
+
+test('the most recent request counters ride beside the conversation totals on snapshots and patches', (t) => {
+  const s = setup(t);
+  s.ready(THREAD); s.owner();
+  s.snapshot(1, { latestTokenUsageInfo: { total: USAGE, last: { ...LAST, cachedInputTokens: 5, reasoningOutputTokens: 2 } } });
+  assert.deepEqual(s.conversations.at(-1).usage, { ...USAGE, last: { ...LAST, cachedInputTokens: 5, reasoningOutputTokens: 2 } });
+  // Patches address the request counters with the same whitelist as the totals.
+  s.state({ type: 'patches', baseRevision: 1, revision: 2, patches: [
+    { op: 'replace', path: ['latestTokenUsageInfo', 'last', 'outputTokens'], value: 4 },
+    { op: 'replace', path: ['latestTokenUsageInfo', 'last', 'totalTokens'], value: 9 },
+    { op: 'replace', path: ['latestTokenUsageInfo', 'last', 'cachedInputTokens'], value: 4 },
+  ] });
+  assert.deepEqual(s.conversations.at(-1).usage, { ...USAGE, last: { inputTokens: 5, outputTokens: 4, totalTokens: 9, cachedInputTokens: 4, reasoningOutputTokens: 2 } });
+  // A missing request group leaves the totals exactly as before.
+  s.state({ type: 'patches', baseRevision: 2, revision: 3, patches: [{ op: 'remove', path: ['latestTokenUsageInfo', 'last'] }] });
+  assert.deepEqual(s.conversations.at(-1).usage, USAGE);
+  // A whole-total replacement keeps the sibling request counters intact.
+  s.snapshot(4, { latestTokenUsageInfo: { total: USAGE, last: LAST } });
+  s.state({ type: 'patches', baseRevision: 4, revision: 5, patches: [
+    { op: 'replace', path: ['latestTokenUsageInfo', 'total'], value: { inputTokens: 200, outputTokens: 50, totalTokens: 250 } },
+  ] });
+  assert.deepEqual(s.conversations.at(-1).usage, { inputTokens: 200, outputTokens: 50, totalTokens: 250, last: LAST });
+});
+
+test('a contradicting request group is dropped while the conversation totals stay confirmed', (t) => {
+  const s = setup(t);
+  s.ready(THREAD); s.owner();
+  for (const [revision, last, expected] of [
+    [1, { inputTokens: 5, outputTokens: 3, totalTokens: 9 }, USAGE],
+    [2, { inputTokens: 5, outputTokens: 3 }, USAGE],
+    [3, null, USAGE],
+    [4, { ...LAST, cachedInputTokens: 6 }, { ...USAGE, last: LAST }],
+    [5, { ...LAST, cachedInputTokens: -1, reasoningOutputTokens: 1 }, { ...USAGE, last: { ...LAST, reasoningOutputTokens: 1 } }],
+  ]) {
+    s.snapshot(revision, { latestTokenUsageInfo: { total: USAGE, last } });
+    assert.deepEqual(s.conversations.at(-1).usage, expected, JSON.stringify(last));
+  }
 });
 
 test('metadata patches update counters and revision gaps resync once before a fresh snapshot', (t) => {
@@ -317,7 +397,7 @@ test('metadata patches update counters and revision gaps resync once before a fr
     { op: 'add', path: ['turnHistory', 'history', 'entitiesByKey', 'key'], value: { items: [{ text: PRIVATE }] } },
   ];
   s.state({ type: 'patches', baseRevision: 1, revision: 2, patches });
-  assert.deepEqual(s.conversations.at(-1).usage, { inputTokens: 150, outputTokens: 30, totalTokens: 180 });
+  assert.deepEqual(s.conversations.at(-1).usage, { inputTokens: 150, outputTokens: 30, totalTokens: 180, last: LAST });
   const count = s.conversations.length;
   s.state({ type: 'patches', baseRevision: 1, revision: 2, patches });
   assert.equal(s.conversations.length, count);
@@ -328,7 +408,7 @@ test('metadata patches update counters and revision gaps resync once before a fr
   s.state({ type: 'patches', baseRevision: 5, revision: 6, patches });
   assert.equal(s.follows().filter((message) => message.params.following).length, 2);
   s.snapshot(6);
-  assert.deepEqual(s.conversations.at(-1).usage, USAGE);
+  assert.deepEqual(s.conversations.at(-1).usage, { ...USAGE, last: LAST });
   s.state({ type: 'patches', baseRevision: 6, revision: 7,
     patches: [{ op: 'replace', path: ['source', 'subAgent'], value: PRIVATE }] });
   assert.deepEqual(s.statuses.at(-1), { connected: false, source: 'codex_app_server', reason: 'connecting' });
@@ -514,6 +594,47 @@ test('expired HTTP leases and unanswered handshakes release sources using inject
   assert.equal(pending.peer.destroyed, true);
   assert.equal(pending.statuses.at(-1).reason, 'source_unavailable');
   assert.equal(pending.conversations.length, 0);
+});
+
+test('a planned refresh keeps the confirmed card and re-subscribes without republishing it as new', (t) => {
+  const s = setup(t, { refreshMs: 3_000, leaseMs: 20_000 }, { telemetry: true });
+  s.subscribe();
+  assert.equal(s.live.snapshot({ taskId: THREAD }).usage.inputTokens, USAGE.inputTokens);
+  // Steady reads keep heartbeats flowing, exactly like the one-second widget poll.
+  for (let i = 0; i < 2; i++) { s.advance(1_000); t.mock.timers.tick(1_000); }
+  const statuses = s.statuses.length, conversations = s.conversations.length, follows = s.follows().length;
+  s.advance(1_100); t.mock.timers.tick(1_000);
+  assert.equal(s.peer.destroyed, true, 'the planned refresh still re-verifies the pipe');
+  assert.equal(s.statuses.length, statuses, 'a planned refresh is not announced as a lost source');
+  const retained = s.live.snapshot({ taskId: THREAD });
+  assert.equal(retained.state, 'available', 'the card keeps its last confirmed numbers through the refresh');
+  assert.equal(retained.usage.inputTokens, USAGE.inputTokens);
+
+  s.advance(20); t.mock.timers.tick(1_000);
+  s.peer.emit('connect'); s.reply(s.request('initialize'), { clientId: CLIENT });
+  assert.deepEqual(s.follows().map((message) => message.params.following), [true],
+    'the surviving pin asks its owner for the stream again');
+  s.advance(501); t.mock.timers.tick(1_000);
+  assert.equal(s.statuses.at(-1).connected, true);
+  assert.equal(s.conversations.length, conversations, 'a retained snapshot is not re-announced as a fresh observation');
+  assert.equal(s.live.snapshot({ taskId: THREAD }).usage.inputTokens, USAGE.inputTokens);
+
+  s.snapshot(2, { latestTokenUsageInfo: { total: { inputTokens: 200, outputTokens: 50, totalTokens: 250 } } });
+  assert.equal(s.conversations.length, conversations + 1);
+  assert.equal(s.live.snapshot({ taskId: THREAD }).usage.inputTokens, 200);
+});
+
+test('a planned refresh that never returns a snapshot stops being trusted', (t) => {
+  const s = setup(t, { refreshMs: 3_000, leaseMs: 20_000 }, { telemetry: true });
+  s.subscribe();
+  s.advance(1_000); t.mock.timers.tick(1_000);
+  s.advance(2_100); t.mock.timers.tick(1_000);
+  assert.equal(s.peer.destroyed, true);
+  assert.equal(s.live.snapshot({ taskId: THREAD }).state, 'available');
+  s.advance(5_001); t.mock.timers.tick(1_000);
+  assert.equal(s.sockets.at(-1).destroyed, true, 'an unanswered refresh releases the source');
+  assert.equal(s.statuses.at(-1).reason, 'source_unavailable');
+  assert.equal(s.live.snapshot({ taskId: THREAD }).state, 'disconnected');
 });
 
 test('desktop observed speed survives confirmed updates slower than the old thirty-second reconnect', (t) => {

@@ -4,13 +4,13 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createTelemetryWorker } from './telemetry/speed-worker.js';
-import { createConfigDefaultsReader } from './telemetry/config-defaults.js';
+import { createConfigDefaultsReader, CONFIGURED_MODEL, CONFIGURED_EFFORT } from './telemetry/config-defaults.js';
 import { createTaskSummary } from './telemetry/task-summary.js';
 import { createUsageSummary, publicUsageSnapshot } from './telemetry/usage-summary.js';
 import { createLiveTelemetry, publicLiveSnapshot, unavailableLiveSnapshot } from './telemetry/live-telemetry.js';
 import { createDesktopLiveConnector } from './telemetry/desktop-live.js';
 import { unavailableTelemetry } from './telemetry/usage.js';
-import { APPROVED_MODELS } from './benchmark/runner.js';
+import { isAllowedModel, isAllowedEffort } from './benchmark/runner.js';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const ORIGIN = 'http://127.0.0.1:4173';
@@ -54,7 +54,7 @@ function validateMetadata(req, pathname, method) {
   if (origin !== undefined) return;
   if (pathname === '/') {
     if (!['none', 'same-origin'].includes(req.headers['sec-fetch-site']) || req.headers['sec-fetch-mode'] !== 'navigate') fail(403, 'fetch_metadata_invalid', 'Navigation metadata is required.');
-  } else if (pathname === '/app.js' || pathname === '/styles.css') {
+  } else if (pathname === '/app.js' || pathname === '/styles.css' || pathname === '/tokens.css') {
     const dest = pathname.endsWith('.js') ? 'script' : 'style';
     if (req.headers['sec-fetch-site'] !== 'same-origin' || req.headers['sec-fetch-mode'] !== 'no-cors' || req.headers['sec-fetch-dest'] !== dest) fail(403, 'fetch_metadata_invalid', 'Asset metadata is required.');
   } else if (pathname === '/api/nonce') {
@@ -86,9 +86,9 @@ async function bodyJson(req) {
   return value;
 }
 function exactKeys(value, keys) { return Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key)); }
-function validatePayload(path, value) {
+function validatePayload(path, value, availableModels = null, availableEfforts = null) {
   if (path === '/api/benchmark/run') {
-    if (!['static', 'animated', 'html-animated', 'cockpit'].includes(value.mode === undefined ? 'static' : value.mode) || !(Object.hasOwn(value, 'requestId') && Object.keys(value).every((key) => ['requestId', 'model', 'reasoningEffort', 'mode'].includes(key))) || !REQUEST_ID.test(value.requestId ?? '') || !APPROVED_MODELS.has(value.model === undefined ? 'configured' : value.model) || !['configured', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(value.reasoningEffort === undefined ? 'configured' : value.reasoningEffort)) fail(400, 'schema_invalid', 'Benchmark request schema is invalid.');
+    if (!['static', 'animated', 'html-animated', 'cockpit'].includes(value.mode === undefined ? 'static' : value.mode) || !(Object.hasOwn(value, 'requestId') && Object.keys(value).every((key) => ['requestId', 'model', 'reasoningEffort', 'mode'].includes(key))) || !REQUEST_ID.test(value.requestId ?? '') || !isAllowedModel(value.model === undefined ? 'configured' : value.model, availableModels) || !isAllowedEffort(value.reasoningEffort === undefined ? 'configured' : value.reasoningEffort, availableEfforts)) fail(400, 'schema_invalid', 'Benchmark request schema is invalid.');
   } else if (path === '/api/benchmark/score') {
     if (!exactKeys(value, ['runId', 'caseId', 'rubricVersion', 'scores']) || !UUID.test(value.runId ?? '') || !((value.rubricVersion === 'pelican-v1' && ['instruction-following', 'logic-grid', 'code-trace'].includes(value.caseId)) || (value.rubricVersion === 'pelican-svg-v2' && value.caseId === 'pelican-svg') || (value.rubricVersion === 'pelican-svg-animated-v1' && value.caseId === 'pelican-svg-animated') || (value.rubricVersion === 'pelican-html-animated-v1' && value.caseId === 'pelican-html-animated') || (value.rubricVersion === 'pelican-cockpit-v1' && value.caseId === 'pelican-cockpit')) || !value.scores || typeof value.scores !== 'object' || Array.isArray(value.scores) || !exactKeys(value.scores, ['correctness', 'consistency', 'constraint_adherence']) || !Object.values(value.scores).every((x) => Number.isInteger(x) && x >= 1 && x <= 5)) fail(400, 'schema_invalid', 'Score request schema is invalid.');
   } else if (path === '/api/benchmark/baseline') {
@@ -120,6 +120,10 @@ export function createCompanionServer({ telemetry, liveTelemetry, benchmark = nu
   const unknownDefaults = () => ({
     model: { state: 'unavailable', source: 'none', reason: 'read_failed', value: null },
     reasoningEffort: { state: 'unavailable', source: 'none', reason: 'read_failed', value: null },
+    // Even a failed read keeps the sentinel selectable; the panel must never
+    // lose the "current configuration" choice.
+    availableModels: [{ ...CONFIGURED_MODEL }],
+    availableEfforts: [{ ...CONFIGURED_EFFORT }],
   });
   const defaultsSnapshot = async () => {
     try {
@@ -127,6 +131,17 @@ export function createCompanionServer({ telemetry, liveTelemetry, benchmark = nu
       await defaultsRefresh;
       return await defaultsReader.snapshot?.() ?? unknownDefaults();
     } catch { return unknownDefaults(); }
+  };
+  // Selectable models come from the live configuration snapshot. A reader that
+  // cannot supply a catalog (failed read or test double) yields an empty set,
+  // so an unknown model is rejected instead of trusted.
+  const availableModels = async () => {
+    const snapshot = await defaultsSnapshot();
+    return Array.isArray(snapshot?.availableModels) ? snapshot.availableModels : [];
+  };
+  const availableEfforts = async () => {
+    const snapshot = await defaultsSnapshot();
+    return Array.isArray(snapshot?.availableEfforts) ? snapshot.availableEfforts : [];
   };
   const unavailableBenchmark = (reason) => ({ status: 'unavailable', activeRun: null, latestRun: null, runs: [], baseline: null, comparison: null, available: false, unavailableReason: reason });
   let closePromise;
@@ -146,7 +161,7 @@ export function createCompanionServer({ telemetry, liveTelemetry, benchmark = nu
       const url = new URL(req.url, ORIGIN);
       if (url.search && req.method === 'POST' && !isPreviewApi) fail(400, 'query_not_allowed', 'Query strings are not allowed.');
       const path = url.pathname;
-      const methods = { '/': 'GET', '/app.js': 'GET', '/styles.css': 'GET', '/api/capabilities': 'GET', '/api/nonce': 'GET', '/api/telemetry': 'GET', '/api/live': 'GET', '/api/tasks': 'GET', '/api/usage': 'GET', '/api/benchmark': 'GET', '/api/benchmark/run': 'POST', '/api/benchmark/score': 'POST', '/api/benchmark/baseline': 'POST', '/api/benchmark/cancel': 'POST', '/api/shutdown': 'POST' };
+      const methods = { '/': 'GET', '/app.js': 'GET', '/styles.css': 'GET', '/tokens.css': 'GET', '/api/capabilities': 'GET', '/api/nonce': 'GET', '/api/telemetry': 'GET', '/api/live': 'GET', '/api/tasks': 'GET', '/api/usage': 'GET', '/api/benchmark': 'GET', '/api/benchmark/run': 'POST', '/api/benchmark/score': 'POST', '/api/benchmark/baseline': 'POST', '/api/benchmark/cancel': 'POST', '/api/shutdown': 'POST' };
       for (const route of [...Object.keys(PREVIEW_ASSETS), PREVIEW_API]) methods[route] = 'GET';
       if (!Object.hasOwn(methods, path)) fail(404, 'not_found', 'Route was not found.');
       if (methods[path] !== req.method) { res.setHeader('Allow', methods[path]); fail(405, 'method_not_allowed', 'Method is not allowed.'); }
@@ -174,8 +189,8 @@ export function createCompanionServer({ telemetry, liveTelemetry, benchmark = nu
         const html = await readFile(join(ROOT, 'public/index.html'));
         res.writeHead(200, { ...NO_CACHE, 'Content-Type': 'text/html; charset=utf-8', 'X-Codex-Companion-Nonce': nonce }); res.end(html); return;
       }
-      if (path === '/app.js' || path === '/styles.css') {
-        const file = path === '/app.js' ? 'public/app.js' : 'public/styles.css';
+      if (path === '/app.js' || path === '/styles.css' || path === '/tokens.css') {
+        const file = path === '/app.js' ? 'public/app.js' : path === '/tokens.css' ? 'public/tokens.css' : 'public/styles.css';
         const content = await readFile(join(ROOT, file));
         res.writeHead(200, { ...NO_CACHE, 'Content-Type': path.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8' }); res.end(content); return;
       }
@@ -274,7 +289,9 @@ export function createCompanionServer({ telemetry, liveTelemetry, benchmark = nu
         json(res, 200, { ...snapshot, defaults: await defaultsSnapshot() }); return;
       }
       if (!benchmark) fail(503, 'benchmark_unavailable', 'Benchmark feature is unavailable.');
-      const body = await bodyJson(req); validatePayload(path, body);
+      const body = await bodyJson(req);
+      const gated = path.endsWith('/run');
+      validatePayload(path, body, gated ? await availableModels() : null, gated ? await availableEfforts() : null);
       const result = path.endsWith('/run') ? await benchmark.run(body)
         : path.endsWith('/score') ? await benchmark.score(body)
         : path.endsWith('/baseline') ? await benchmark.baseline(body)
@@ -308,7 +325,19 @@ export async function startServer() {
   await defaults.refresh();
   await telemetry.start();
   let benchmark = null;
-  try { const module = await import('./benchmark/service.js'); benchmark = await module.createBenchmarkService(); } catch { benchmark = null; }
+  try {
+    const module = await import('./benchmark/service.js');
+    benchmark = await module.createBenchmarkService({
+      modelPolicy: () => {
+        const snapshot = defaults.snapshot();
+        return Array.isArray(snapshot?.availableModels) ? snapshot.availableModels : [];
+      },
+      effortPolicy: () => {
+        const snapshot = defaults.snapshot();
+        return Array.isArray(snapshot?.availableEfforts) ? snapshot.availableEfforts : [];
+      },
+    });
+  } catch { benchmark = null; }
   let app;
   const shutdown = async () => { try { await app.close(); } finally { process.exit(0); } };
   app = createCompanionServer({ telemetry, liveTelemetry, benchmark, defaults, shutdownToken: process.env.CODEX_COMPANION_SHUTDOWN_TOKEN, onShutdown: shutdown });

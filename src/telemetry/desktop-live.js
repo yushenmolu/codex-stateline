@@ -10,15 +10,32 @@ const count = (value) => Number.isSafeInteger(value) && value >= 0;
 const safePath = (value) => (typeof value === 'string' && value.length <= 256 && !['__proto__', 'prototype', 'constructor'].includes(value))
   || (Number.isSafeInteger(value) && value >= 0 && value <= 100_000);
 const FIELDS = new Set(['latestTokenUsageInfo', 'latestModel', 'latestReasoningEffort', 'threadRuntimeStatus', 'source', 'threadSource', 'parentThreadId', 'ephemeral', 'sideConversation']);
+// The three confirmed counters gate the whole usage; the cache counters are optional.
+const USAGE_KEYS = ['inputTokens', 'outputTokens', 'totalTokens', 'cachedInputTokens', 'reasoningOutputTokens'];
+
+function optionals(total, value) {
+  if (count(value.cachedInputTokens) && value.cachedInputTokens <= value.inputTokens) total.cachedInputTokens = value.cachedInputTokens;
+  if (count(value.reasoningOutputTokens)) total.reasoningOutputTokens = value.reasoningOutputTokens;
+  return total;
+}
 
 function tokens(value) {
   if (!object(value) || !['inputTokens', 'outputTokens', 'totalTokens'].every((key) => count(value[key]))
     || value.inputTokens + value.outputTokens !== value.totalTokens) return null;
-  return { inputTokens: value.inputTokens, outputTokens: value.outputTokens, totalTokens: value.totalTokens };
+  // An unusable cache counter means "unknown", not "this usage is invalid".
+  return optionals({ inputTokens: value.inputTokens, outputTokens: value.outputTokens, totalTokens: value.totalTokens }, value);
+}
+
+// The runtime also reports the counters of the most recent request; keep them beside the totals.
+function usageState(info) {
+  const total = tokens(info?.total);
+  if (!total) return null;
+  const last = tokens(info?.last);
+  return last ? { ...total, last } : total;
 }
 
 function field(key, value) {
-  if (key === 'latestTokenUsageInfo') return { total: tokens(value?.total) };
+  if (key === 'latestTokenUsageInfo') return { total: tokens(value?.total), last: tokens(value?.last) };
   if (key === 'threadRuntimeStatus') return {
     type: ['active', 'idle', 'notLoaded', 'systemError'].includes(value?.type) ? value.type : null,
     activeFlags: Array.isArray(value?.activeFlags) ? value.activeFlags.filter((flag) => ['waitingOnApproval', 'waitingOnUserInput'].includes(flag)) : [],
@@ -54,12 +71,15 @@ function applyPatch(state, patch) {
   if (!FIELDS.has(key)) return true;
   if (path.length === 1) { state[key] = field(key, patch.op === 'remove' ? null : patch.value); return true; }
   if (key === 'latestTokenUsageInfo') {
-    if (path[1] !== 'total') return true;
-    if (path.length === 2) { state[key] = { total: patch.op === 'remove' ? null : tokens(patch.value) }; return true; }
-    if (path.length === 3 && ['inputTokens', 'outputTokens', 'totalTokens'].includes(path[2])) {
-      state[key] ??= { total: null };
-      state[key].total ??= { inputTokens: null, outputTokens: null, totalTokens: null };
-      state[key].total[path[2]] = patch.op !== 'remove' && count(patch.value) ? patch.value : null;
+    const group = path[1];
+    if (group !== 'total' && group !== 'last') return true;
+    state[key] ??= { total: null, last: null };
+    // A whole-total replacement keeps the sibling request counters intact.
+    if (path.length === 2) { state[key][group] = patch.op === 'remove' ? null : tokens(patch.value); return true; }
+    if (path.length === 3 && USAGE_KEYS.includes(path[2])) {
+      state[key][group] ??= { inputTokens: null, outputTokens: null, totalTokens: null };
+      // A cache counter patched out of range stays unset; publish() drops it then.
+      state[key][group][path[2]] = patch.op !== 'remove' && count(patch.value) ? patch.value : null;
     }
     return true;
   }
@@ -100,12 +120,30 @@ export function createDesktopLiveConnector({
       for (const [id, pending] of requests) if (pending.threadId === entry.id) requests.delete(id);
       observe({ type: 'removed', threadId: entry.id });
     }
-    function disconnect(reason = 'source_disconnected') {
+    // An announced disconnect releases everything: the source is gone, so its
+    // snapshots are no longer trustworthy. A planned refresh is different. It keeps
+    // the candidate list, because the peer drops our subscriptions with the socket
+    // and a reader that forgot every thread here would blink out every refresh
+    // interval. live-telemetry's stale window still bounds a refresh that never
+    // completes, so a broken source cannot be papered over by a stale card.
+    function disconnect(reason = 'source_disconnected', { announce = true } = {}) {
       const old = socket;
-      for (const entry of candidates.values()) if (entry.subscribed) follow(entry, false);
-      candidates.clear(); requests.clear(); socket = null; clientId = null; ready = false; buffer = Buffer.alloc(0);
+      requests.clear();
+      if (announce) {
+        for (const entry of candidates.values()) if (entry.subscribed) follow(entry, false);
+        candidates.clear();
+      } else {
+        for (const entry of candidates.values()) {
+          entry.subscribed = false; entry.resyncing = false; entry.deadline = now() + 5_000;
+          // Hold the confirmed snapshot instead of re-announcing it as if it were
+          // new: the values are still the last known truth, but they are not an
+          // observation of this moment and must not refresh the retention window.
+          entry.retained = entry.state !== null;
+        }
+      }
+      socket = null; clientId = null; ready = false; buffer = Buffer.alloc(0);
       old?.destroy(); retryAt = now() + reconnectMs;
-      status({ connected: false, source: SOURCE, reason });
+      if (announce) status({ connected: false, source: SOURCE, reason });
     }
     function request(method, params, version, threadId = null) {
       const requestId = randomUUID();
@@ -118,7 +156,7 @@ export function createDesktopLiveConnector({
       if (!entry) {
         if (candidates.size >= maxCandidates) { disconnect('capacity_exceeded'); return; }
         if (ready) { ready = false; status({ connected: false, source: SOURCE, reason: 'connecting' }); }
-        entry = { id, owner: null, subscribed: false, interests: new Set(), revision: null, state: null, resyncing: false, deadline: now() + 5_000 };
+        entry = { id, owner: null, subscribed: false, interests: new Set(), revision: null, state: null, retained: false, resyncing: false, deadline: now() + 5_000 };
         candidates.set(id, entry);
         request('thread-owner-discovery', { hostId: 'local', conversationId: id }, 1, id);
       }
@@ -126,12 +164,15 @@ export function createDesktopLiveConnector({
     }
     function publish(entry) {
       const value = entry.state;
-      if (!value || !ready) return;
+      // A retained snapshot is the last known truth, not a fresh observation. It is
+      // deliberately not re-announced: keep its original observedAt so the card and
+      // every window built on it stay honest about how old the numbers are.
+      if (!value || !ready || entry.retained) return;
       const runtime = value.threadRuntimeStatus?.type;
       if (!['active', 'idle', 'systemError'].includes(runtime)) { observe({ type: 'removed', threadId: entry.id }); return; }
       observe({ type: 'conversation', threadId: entry.id, primary: primary(value),
         state: runtime === 'active' ? 'active' : runtime === 'systemError' ? 'failed' : 'idle',
-        usage: tokens(value.latestTokenUsageInfo?.total), model: value.latestModel ?? null,
+        usage: usageState(value.latestTokenUsageInfo), model: value.latestModel ?? null,
         reasoningEffort: value.latestReasoningEffort ?? null, observedAt: new Date(wallClock()).toISOString() });
     }
     function resync(entry) {
@@ -159,7 +200,10 @@ export function createDesktopLiveConnector({
         if (pending.method === 'initialize') {
           if (typeof message.result?.clientId !== 'string' || message.result.clientId.length > 256) return disconnect('source_invalid');
           clientId = message.result.clientId;
-          if (selected !== null) candidate(selected);
+          if (selected !== null && !candidates.has(selected)) candidate(selected);
+          // After a planned refresh the pins survive but the subscriptions did not,
+          // so every retained owner is asked again for the stream.
+          for (const entry of candidates.values()) if (entry.owner) follow(entry, true);
         } else {
           const entry = candidates.get(pending.threadId);
           if (!entry) return;
@@ -197,7 +241,7 @@ export function createDesktopLiveConnector({
         if (entry.revision !== null && change.revision < entry.revision) return;
         const value = change.conversationState;
         if (!object(value) || value.id !== entry.id) return disconnect('identity_unverified');
-        entry.state = project(value); entry.revision = change.revision; entry.resyncing = false;
+        entry.state = project(value); entry.revision = change.revision; entry.resyncing = false; entry.retained = false;
         publish(entry);
       } else if (change.type === 'patches') {
         if (entry.revision !== null && change.revision <= entry.revision) return;
@@ -210,6 +254,7 @@ export function createDesktopLiveConnector({
           return;
         }
         entry.revision = change.revision;
+        entry.retained = false;
         publish(entry);
       }
     }
@@ -241,13 +286,16 @@ export function createDesktopLiveConnector({
         if (socket) disconnect('source_unavailable');
         return;
       }
-      if (socket && now() - openedAt > refreshMs) disconnect();
+      if (socket && now() - openedAt > refreshMs) disconnect('source_disconnected', { announce: false });
       for (const [id, pending] of requests) if (pending.deadline < now()) {
         requests.delete(id);
         if (pending.method === 'initialize') disconnect('source_unavailable');
         else disconnect('identity_unverified');
       }
-      for (const entry of candidates.values()) if (!entry.state && entry.deadline < now()) { disconnect('source_unavailable'); break; }
+      // Retention is bounded on purpose: a refresh that never returns a new
+      // snapshot must not leave a card showing numbers that only look current
+      // because heartbeats keep the contact clock warm.
+      for (const entry of candidates.values()) if ((!entry.state || entry.retained) && entry.deadline < now()) { disconnect('source_unavailable'); break; }
       if (!socket && now() >= retryAt) open();
       if (clientId && socket?.writable) {
         if (!ready && now() - openedAt >= discoverySettleMs && requests.size === 0 && [...candidates.values()].every((entry) => entry.state !== null)) {

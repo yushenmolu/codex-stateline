@@ -117,16 +117,87 @@ test('live rejects malformed, future and out-of-order counters but accepts a con
   assert.equal(s.live.snapshot().usage.totalTokens, 0);
 });
 
-test('live completed state keeps confirmed conversation usage only when explicitly pinned', () => {
+test('live carries optional cache counters and drops an out-of-range cache count without voiding usage', () => {
+  const s = setup(); s.connect(); s.thread(); s.turn();
+  const cached = { ...USAGE, cachedInputTokens: 90, reasoningOutputTokens: 10 };
+  s.usage(cached);
+  assert.deepEqual(s.live.snapshot().usage, { scope: 'conversation', includesSubagents: false, ...cached });
+  const projected = s.live.snapshot();
+  assert.equal(projected.usage.cachedInputTokens, 90);
+  assert.equal(projected.usage.reasoningOutputTokens, 10);
+  // Out-of-range or malformed cache counters mean "unknown", not "discard this usage".
+  for (const extra of [{ cachedInputTokens: 101 }, { cachedInputTokens: -1 }, { cachedInputTokens: '90' },
+    { reasoningOutputTokens: 1.5 }, { cachedInputTokens: USAGE.inputTokens + 1, reasoningOutputTokens: -1 }]) {
+    s.usage({ ...USAGE, ...extra });
+    assert.deepEqual(s.live.snapshot().usage, { scope: 'conversation', includesSubagents: false, ...USAGE }, JSON.stringify(extra));
+  }
+  s.usage({ ...USAGE, cachedInputTokens: USAGE.inputTokens, reasoningOutputTokens: 0 });
+  assert.deepEqual(s.live.snapshot().usage, { scope: 'conversation', includesSubagents: false, ...USAGE, cachedInputTokens: 100, reasoningOutputTokens: 0 });
+  s.usage(USAGE);
+  assert.deepEqual(s.live.snapshot().usage, { scope: 'conversation', includesSubagents: false, ...USAGE });
+});
+
+test('live keeps the last confirmed conversation data after the turn completes instead of blanking out', () => {
   const s = setup(); s.connect(); s.thread(); s.turn(); s.usage(); s.advance(10_000);
   s.emit({ type: 'turn_completed', threadId: THREAD, turnId: TURN, state: 'completed', startedAt: new Date(NOW).toISOString(), completedAt: new Date(NOW + 10_000).toISOString(), elapsedSeconds: 10 });
-  assert.equal(s.live.snapshot().reason, 'no_active_thread');
+  const idle = s.live.snapshot();
+  assert.equal(idle.state, 'available');
+  assert.equal(idle.session.id, THREAD);
+  assert.equal(idle.usage.totalTokens, 120);
+  assert.deepEqual(idle.lifecycle, {
+    state: 'completed', startedAt: new Date(NOW).toISOString(),
+    completedAt: new Date(NOW + 10_000).toISOString(), elapsedSeconds: 10,
+  });
   const pinned = s.live.snapshot({ taskId: THREAD });
   assert.equal(pinned.lifecycle.state, 'completed');
   assert.equal(pinned.lifecycle.elapsedSeconds, 10);
   assert.equal(pinned.usage.totalTokens, 120);
+  // Past the retention window the panel reports no active thread again.
+  s.advance(300_001);
+  s.emit({ type: 'heartbeat' });
+  assert.equal(s.live.snapshot().reason, 'no_active_thread');
+  assert.equal(s.live.snapshot().usage, null);
   s.emit({ type: 'removed', threadId: THREAD });
   assert.equal(s.live.snapshot({ taskId: THREAD }).usage, null);
+});
+
+test('live falls back to the freshest idle conversation inside the retention window', () => {
+  const s = setup(); s.connect();
+  s.emit({ type: 'conversation', threadId: THREAD, primary: true, state: 'idle', usage: USAGE });
+  assert.equal(s.live.snapshot().state, 'available');
+  assert.equal(s.live.snapshot().session.id, THREAD);
+  // A newer idle conversation wins over an older one.
+  s.advance(1_000);
+  s.emit({ type: 'conversation', threadId: OTHER, primary: true, state: 'idle', usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } });
+  assert.equal(s.live.snapshot().session.id, OTHER);
+  assert.equal(s.live.snapshot().usage.totalTokens, 15);
+  // An active conversation always outranks the idle fallback.
+  s.emit({ type: 'conversation', threadId: THREAD, primary: true, state: 'active', usage: USAGE });
+  assert.equal(s.live.snapshot().session.id, THREAD);
+  assert.equal(s.live.snapshot().lifecycle.state, 'running');
+  // Subagent threads never become the fallback on their own.
+  s.emit({ type: 'removed', threadId: OTHER });
+  s.emit({ type: 'conversation', threadId: THREAD, primary: false, state: 'idle', usage: USAGE });
+  s.emit({ type: 'heartbeat' });
+  assert.equal(s.live.snapshot().reason, 'no_active_thread');
+});
+
+test('live keeps the most recent request counters and degrades a dirty request group to unknown', () => {
+  const s = setup(); s.connect(); s.thread(); s.turn();
+  const last = { inputTokens: 40, outputTokens: 8, totalTokens: 48, cachedInputTokens: 30, reasoningOutputTokens: 2 };
+  s.usage({ ...USAGE, last });
+  assert.deepEqual(s.live.snapshot().usage, { scope: 'conversation', includesSubagents: false, ...USAGE, last });
+  assert.deepEqual(publicLiveSnapshot(s.live.snapshot(), { taskId: THREAD, now: NOW }).usage.last, last);
+  // A request group that contradicts itself is unknown, not a reason to void the totals.
+  for (const broken of [{ ...last, totalTokens: 49 }, { inputTokens: 40, outputTokens: 8 }, null]) {
+    s.usage({ ...USAGE, last: broken });
+    assert.deepEqual(s.live.snapshot().usage, { scope: 'conversation', includesSubagents: false, ...USAGE }, JSON.stringify(broken));
+  }
+  // An out-of-range cache counter inside the request group drops only that field.
+  s.usage({ ...USAGE, last: { ...last, cachedInputTokens: last.inputTokens + 1 } });
+  assert.deepEqual(s.live.snapshot().usage.last, { inputTokens: 40, outputTokens: 8, totalTokens: 48, reasoningOutputTokens: 2 });
+  s.usage(USAGE);
+  assert.deepEqual(s.live.snapshot().usage, { scope: 'conversation', includesSubagents: false, ...USAGE });
 });
 
 test('live caps retained thread metadata and connector failures stay bounded', async () => {
@@ -143,7 +214,7 @@ test('live HTTP projection allowlists every layer and enforces requested convers
   const value = {
     sampledAt: new Date(NOW).toISOString(), state: 'available', source: 'codex_app_server', reason: null,
     observedAt: new Date(NOW).toISOString(), session: { id: THREAD, preview: 'private-text' },
-    usage: { scope: 'conversation', includesSubagents: false, ...USAGE, secret: 'private-text' },
+    usage: { scope: 'conversation', includesSubagents: false, ...USAGE, cachedInputTokens: 40, reasoningOutputTokens: 5, secret: 'private-text' },
     model: 'example-provider/gpt-6.1-sol', reasoningEffort: 'ultra',
     lifecycle: { state: 'running', startedAt: new Date(NOW).toISOString(), completedAt: null, elapsedSeconds: null, text: 'private-text' },
     speed: { source: 'confirmed_request', outputTokensPerSecond: 3, observedAt: new Date(NOW).toISOString(), headers: 'private-text' },
@@ -154,6 +225,12 @@ test('live HTTP projection allowlists every layer and enforces requested convers
   assert.deepEqual(Object.keys(out), ['sampledAt', 'state', 'source', 'reason', 'observedAt', 'session', 'usage', 'model', 'reasoningEffort', 'lifecycle', 'speed']);
   assert.deepEqual(out.session, { id: THREAD });
   assert.equal(out.usage.totalTokens, 120);
+  assert.equal(out.usage.cachedInputTokens, 40);
+  assert.equal(out.usage.reasoningOutputTokens, 5);
+  // An out-of-range cache count is dropped from the projection; the usage itself still confirms.
+  const outOfRange = publicLiveSnapshot({ ...value, usage: { ...value.usage, cachedInputTokens: 101 } }, { taskId: THREAD, now: NOW });
+  assert.deepEqual(outOfRange.usage, { scope: 'conversation', includesSubagents: false, ...USAGE, reasoningOutputTokens: 5 });
+  assert.equal(outOfRange.state, 'available');
   assert.equal(publicLiveSnapshot(value, { taskId: OTHER, now: NOW }).usage, null);
   assert.deepEqual(publicLiveSnapshot({ state: 'available', source: 'log' }, { now: NOW }), unavailableLiveSnapshot('source_invalid', NOW));
   assert.equal(publicLiveSnapshot({ ...value, state: 'disconnected' }, { now: NOW }).usage, null);
@@ -168,7 +245,8 @@ test('desktop conversation counters need no fabricated turn identity and null us
   s.emit({ type: 'conversation', threadId: THREAD, primary: true, state: 'active', usage: null });
   assert.equal(s.live.snapshot().usage, null);
   s.emit({ type: 'conversation', threadId: THREAD, primary: true, state: 'idle', usage: USAGE });
-  assert.equal(s.live.snapshot().usage, null);
+  assert.equal(s.live.snapshot().usage.totalTokens, 120);
+  assert.equal(s.live.snapshot().lifecycle.state, 'completed');
   assert.equal(s.live.snapshot({ taskId: THREAD }).usage.totalTokens, 120);
 });
 

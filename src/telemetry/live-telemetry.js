@@ -13,11 +13,23 @@ const time = (value) => typeof value === 'string' && Number.isFinite(Date.parse(
 // 'configured' is a request sentinel, never evidence of the model that ran.
 const liveModel = (value) => validModel(value) && value !== 'configured' ? value : null;
 
-function usage(value) {
+function counters(value) {
   if (!object(value) || !['inputTokens', 'outputTokens', 'totalTokens'].every((key) => safeInt(value[key]))
     || !Number.isSafeInteger(value.inputTokens + value.outputTokens)
     || value.inputTokens + value.outputTokens !== value.totalTokens) return null;
-  return { inputTokens: value.inputTokens, outputTokens: value.outputTokens, totalTokens: value.totalTokens };
+  const confirmed = { inputTokens: value.inputTokens, outputTokens: value.outputTokens, totalTokens: value.totalTokens };
+  // Cache counters are optional: an unusable one stays absent rather than voiding the usage.
+  if (safeInt(value.cachedInputTokens) && value.cachedInputTokens <= value.inputTokens) confirmed.cachedInputTokens = value.cachedInputTokens;
+  if (safeInt(value.reasoningOutputTokens)) confirmed.reasoningOutputTokens = value.reasoningOutputTokens;
+  return confirmed;
+}
+
+// The most recent request is optional: it is absent, not fatal, when its counters disagree.
+function usage(value) {
+  const confirmed = counters(value);
+  if (!confirmed) return null;
+  const last = counters(value.last);
+  return last ? { ...confirmed, last } : confirmed;
 }
 
 export function unavailableLiveSnapshot(reason = 'source_unavailable', now = Date.now(), state = 'unavailable', source = 'none') {
@@ -80,7 +92,7 @@ export function publicLiveSnapshot(value, { taskId = null, now = Date.now() } = 
   return result;
 }
 
-export function createLiveTelemetry({ connector = null, wallClock = () => Date.now(), monotonicClock = () => performance.now(), maxThreads = MAX_THREADS, staleMs = 15_000 } = {}) {
+export function createLiveTelemetry({ connector = null, wallClock = () => Date.now(), monotonicClock = () => performance.now(), maxThreads = MAX_THREADS, staleMs = 15_000, idleRetentionMs = 300_000 } = {}) {
   const threads = new Map();
   let connected = false, stopped = false, started = false, connection = null, lastContact = null;
   let source = 'none', reason = 'source_unavailable';
@@ -119,7 +131,7 @@ export function createLiveTelemetry({ connector = null, wallClock = () => Date.n
       if (total) thread.usage = { scope: 'conversation', includesSubagents: false, ...total };
       thread.lifecycle = event.state === 'active'
         ? { state: 'running', startedAt: null, completedAt: null, elapsedSeconds: null }
-        : null;
+        : event.state === 'idle' ? { state: 'completed', startedAt: null, completedAt: null, elapsedSeconds: null } : null;
       if (Object.hasOwn(event, 'model')) thread.model = liveModel(event.model);
       if (Object.hasOwn(event, 'reasoningEffort')) thread.reasoningEffort = validEffort(event.reasoningEffort) ? event.reasoningEffort : null;
       if (event.state === 'active') thread.speedTracker.observe(thread.id, total, observedAt);
@@ -174,6 +186,13 @@ export function createLiveTelemetry({ connector = null, wallClock = () => Date.n
       if (active.length > 1) return unavailableLiveSnapshot('multiple_active_threads', now, 'ambiguous', source);
       thread = active[0];
       if (thread?.primary === null) return unavailableLiveSnapshot('identity_unverified', now, 'unavailable', source);
+      // A finished conversation keeps its last confirmed data for a short while instead of blanking out.
+      if (!thread) {
+        const idle = [...threads.values()].filter((entry) => entry.primary !== false && entry.state === 'idle'
+          && now - Date.parse(entry.observedAt) <= idleRetentionMs);
+        thread = idle.reduce((best, entry) => (!best || Date.parse(entry.observedAt) > Date.parse(best.observedAt) ? entry : best), null);
+        if (thread?.primary === null) return unavailableLiveSnapshot('identity_unverified', now, 'unavailable', source);
+      }
     }
     if (!thread || (taskId === null ? thread.primary !== true : thread.primary === false)) return unavailableLiveSnapshot(taskId ? 'thread_not_observed' : 'no_active_thread', now, 'unavailable', source);
     return publicLiveSnapshot({

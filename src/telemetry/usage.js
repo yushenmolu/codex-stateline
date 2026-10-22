@@ -84,7 +84,10 @@ export function sessionFilenameIdentity(filename) {
   return match ? { id: match[1], dual: Boolean(match[2]) } : null;
 }
 export const validModel = (v) => typeof v === 'string' && v.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(v);
-export const validEffort = (v) => ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(v);
+// Every reasoning level Codex accepts in `enabled-reasoning-efforts`; the
+// whitelist also keeps an arbitrary string out of `-c model_reasoning_effort=`.
+export const EFFORT_VALUES = Object.freeze(['none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'persistent']);
+export const validEffort = (v) => typeof v === 'string' && EFFORT_VALUES.includes(v);
 const validId = (v) => typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v);
 export function unavailableTelemetry(reason = 'no_session', state = 'unavailable', sources = {}) {
   return {
