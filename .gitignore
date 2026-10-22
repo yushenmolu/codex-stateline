@@ -7,9 +7,11 @@
 *.before
 *.bak
 
-# Generated artwork; the legacy launcher's shipped SVG stays tracked
-/output/pelican-latest.svg
-/output/pelican-latest.png
+# Generated artwork and run artifacts. Everything under output/ is regenerable
+# except the single finished SVG the legacy animation launcher ships with
+# (scripts/open-pelican-animation.ps1 reads it from that fixed path).
+/output/*
+!/output/pelican-362f3c3d-animated.svg
 
 # Runtime data, credentials and build artifacts
 node_modules/
