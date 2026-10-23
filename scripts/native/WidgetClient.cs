@@ -58,6 +58,10 @@ public sealed class WidgetWindow:Window {
    // Tray-only lifetime: the panel has no taskbar button, so closing it hides
    // the window and the tray icon stays the way back. A real exit disposes it.
    TrayIcon tray;bool allowClose;string revealPath;
+   // The panel is a companion to Codex, not a desktop ornament: it follows the
+   // foreground window and steps aside whenever the user works in anything else.
+   // `trayHidden` still wins, so a deliberate hide is never undone by a poll.
+   bool trayHidden,autoHidden,pinned;
     Window settingsWindow;ScrollViewer settingsWindowViewport;ComboBox settingsModels,settingsEfforts,settingsModes;TextBlock settingsSummary;TextBlock selectedUsageCaption,selectedUsageState;TextBlock[] overallMetrics=new TextBlock[3];TextBlock overallCaption,overallState;Button settingsHeaderButton,closeSettings;ScrollViewer mainViewport;bool syncingDraft;int usageGeneration,usageServiceGeneration;string usageTask,legacySessionId;Dictionary<string,object> overallUsage,selectedUsage;bool usagePending,usageInFlight,selectedUsageActive,usageRouteMissing,usageServiceInitialized;
    Window usageWindow;ScrollViewer usageWindowViewport;Border usageView;Button usageButton;Slider usageRange;Grid usageBars;TextBlock usageRangeLabel,usageRangeTotal,usageChartNote,usageProgress,usageScale,usageChartStart,usageChartEnd;readonly List<Border> usageBarControls=new List<Border>();readonly List<TextBlock> usageRangeLabels=new List<TextBlock>();
    static readonly string[] UsageRangeIds={"today","7d","30d","90d","all"};static readonly string[] UsageRangeTitles={"今天","最近 7 天","最近 30 天","最近 90 天","全部记录"};
@@ -127,7 +131,7 @@ public sealed class WidgetWindow:Window {
      metricsGrid=new Grid{MinHeight=84,Margin=new Thickness(0,0,0,6),Visibility=System.Windows.Visibility.Collapsed};var usageSurface=new Border{Background=B("#111320"),BorderBrush=Rim(),BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(14),Padding=new Thickness(12,8,12,9)};metricsGrid.Children.Add(usageSurface);TextBlock[] selectedUsageMetrics;usageSurface.Child=BuildUsageCard("当前对话 · 含已核实代理",out selectedUsageCaption,out selectedUsageState,out selectedUsageMetrics);metrics[0]=selectedUsageMetrics[0];metrics[1]=selectedUsageMetrics[1];metrics[2]=selectedUsageMetrics[2];System.Windows.Automation.AutomationProperties.SetAutomationId(metrics[2],"TotalTokens");System.Windows.Automation.AutomationProperties.SetAutomationId(metrics[0],"InputTokens");System.Windows.Automation.AutomationProperties.SetAutomationId(metrics[1],"OutputTokens");stack.Children.Add(metricsGrid);
     usageView=BuildUsageUi();
    // Model identity uses the full row; effort and speed share the secondary row.
-    var metadata=new StackPanel{Margin=new Thickness(13,0,13,4)};telemetryMetadata=metadata;contextLabel=Text("模型 · 未知",11);contextLabel.Foreground=B("#C7CDDC");contextLabel.Margin=new Thickness(0,0,0,4);contextLabel.LineHeight=16;contextLabel.LineStackingStrategy=LineStackingStrategy.BlockLineHeight;contextLabel.TextWrapping=TextWrapping.NoWrap;contextLabel.TextTrimming=TextTrimming.CharacterEllipsis;contextLabel.Visibility=System.Windows.Visibility.Collapsed;System.Windows.Automation.AutomationProperties.SetAutomationId(contextLabel,"ConversationContext");contextLabel.ToolTip="日志记录的会话模型，不代表平台实际路由。";metadata.Children.Add(contextLabel);var detailRow=new Grid();detailRow.ColumnDefinitions.Add(new ColumnDefinition());detailRow.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(1,GridUnitType.Star)});effortLabel=Text("推理强度 · 未知",11);effortLabel.Foreground=B("#9AA3B8");effortLabel.Margin=new Thickness(0);effortLabel.LineHeight=16;effortLabel.LineStackingStrategy=System.Windows.LineStackingStrategy.BlockLineHeight;effortLabel.VerticalAlignment=VerticalAlignment.Center;effortLabel.TextWrapping=TextWrapping.NoWrap;effortLabel.TextTrimming=TextTrimming.CharacterEllipsis;effortLabel.Visibility=System.Windows.Visibility.Collapsed;System.Windows.Automation.AutomationProperties.SetAutomationId(effortLabel,"ConversationEffort");effortLabel.ToolTip="日志记录的推理强度，不代表平台实际路由。";detailRow.Children.Add(effortLabel);var speedRow=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};speedPanel=speedRow;Grid.SetColumn(speedRow,1);var speedTitle=Text("上轮均速 token/s",11);speedCaption=speedTitle;speedTitle.Foreground=B("#9AA3B8");speedTitle.Margin=new Thickness(0,0,6,0);speedTitle.LineHeight=16;speedTitle.TextWrapping=TextWrapping.NoWrap;speedTitle.VerticalAlignment=VerticalAlignment.Center;speedRow.Children.Add(speedTitle);metrics[3]=Text("—",13);metrics[3].FontFamily=new FontFamily("Bahnschrift");metrics[3].FontWeight=FontWeights.Medium;metrics[3].Foreground=B("#C7CDDC");metrics[3].Margin=new Thickness(0);metrics[3].TextWrapping=TextWrapping.NoWrap;metrics[3].TextAlignment=TextAlignment.Right;metrics[3].LineHeight=18;Numeric(metrics[3],32,TextAlignment.Right);System.Windows.Automation.AutomationProperties.SetAutomationId(metrics[3],"TurnAverageSpeed");speedRow.Children.Add(metrics[3]);detailRow.Children.Add(speedRow);metadata.Children.Add(detailRow);stack.Children.Add(metadata);BuildTaskDetailUi(stack);BuildUsageEntry(stack);var buttons=new StackPanel{Orientation=Orientation.Horizontal};run=Button("鹈鹕 · "+Label(selectedMode)+" ↗","RunPelican");run.Click+=delegate{Run();};var result=Button("结果 / 设置","Results");result.Click+=delegate{OpenResults();};var refresh=Button("↻","Refresh");refresh.Click+=delegate{Poll();};bench=Text("使用当前配置 · 尚未运行",11);bench.Margin=new Thickness(0,2,0,0);System.Windows.Automation.AutomationProperties.SetAutomationId(bench,"BenchmarkProgress");animationTimer.Tick+=delegate{SampleAnimations();};timer=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(100)};timer.Tick+=delegate{Heartbeats++;DrainClientEvents();DrainCockpitFrame();CheckCockpitLoad();ConsumeRevealRequest();if(++ticks%10==0){Poll();UpdateTray();}};Loaded+=delegate{if(!testMode)timer.Start();if(!testMode)Poll();if(!fixture&&!testMode)CreateTray();};Closing+=delegate(object sender,System.ComponentModel.CancelEventArgs args){if(fixture||testMode||allowClose)return;args.Cancel=true;HideToTray();};Closed+=delegate{lock(cockpitFrameGate)widgetClosed=true;DisposeTray();DetachPreviewEvents();StopHtml();windowGeneration++;InvalidatePreview();timer.Stop();if(usageWindow!=null)usageWindow.Close();if(settingsWindow!=null)settingsWindow.Close();if(results!=null)results.Close();if(browser!=null)browser.Dispose();client.Dispose();};if(fixture){SetFixture();run.IsEnabled=false;} }
+    var metadata=new StackPanel{Margin=new Thickness(13,0,13,4)};telemetryMetadata=metadata;contextLabel=Text("模型 · 未知",11);contextLabel.Foreground=B("#C7CDDC");contextLabel.Margin=new Thickness(0,0,0,4);contextLabel.LineHeight=16;contextLabel.LineStackingStrategy=LineStackingStrategy.BlockLineHeight;contextLabel.TextWrapping=TextWrapping.NoWrap;contextLabel.TextTrimming=TextTrimming.CharacterEllipsis;contextLabel.Visibility=System.Windows.Visibility.Collapsed;System.Windows.Automation.AutomationProperties.SetAutomationId(contextLabel,"ConversationContext");contextLabel.ToolTip="日志记录的会话模型，不代表平台实际路由。";metadata.Children.Add(contextLabel);var detailRow=new Grid();detailRow.ColumnDefinitions.Add(new ColumnDefinition());detailRow.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(1,GridUnitType.Star)});effortLabel=Text("推理强度 · 未知",11);effortLabel.Foreground=B("#9AA3B8");effortLabel.Margin=new Thickness(0);effortLabel.LineHeight=16;effortLabel.LineStackingStrategy=System.Windows.LineStackingStrategy.BlockLineHeight;effortLabel.VerticalAlignment=VerticalAlignment.Center;effortLabel.TextWrapping=TextWrapping.NoWrap;effortLabel.TextTrimming=TextTrimming.CharacterEllipsis;effortLabel.Visibility=System.Windows.Visibility.Collapsed;System.Windows.Automation.AutomationProperties.SetAutomationId(effortLabel,"ConversationEffort");effortLabel.ToolTip="日志记录的推理强度，不代表平台实际路由。";detailRow.Children.Add(effortLabel);var speedRow=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};speedPanel=speedRow;Grid.SetColumn(speedRow,1);var speedTitle=Text("上轮均速 token/s",11);speedCaption=speedTitle;speedTitle.Foreground=B("#9AA3B8");speedTitle.Margin=new Thickness(0,0,6,0);speedTitle.LineHeight=16;speedTitle.TextWrapping=TextWrapping.NoWrap;speedTitle.VerticalAlignment=VerticalAlignment.Center;speedRow.Children.Add(speedTitle);metrics[3]=Text("—",13);metrics[3].FontFamily=new FontFamily("Bahnschrift");metrics[3].FontWeight=FontWeights.Medium;metrics[3].Foreground=B("#C7CDDC");metrics[3].Margin=new Thickness(0);metrics[3].TextWrapping=TextWrapping.NoWrap;metrics[3].TextAlignment=TextAlignment.Right;metrics[3].LineHeight=18;Numeric(metrics[3],32,TextAlignment.Right);System.Windows.Automation.AutomationProperties.SetAutomationId(metrics[3],"TurnAverageSpeed");speedRow.Children.Add(metrics[3]);detailRow.Children.Add(speedRow);metadata.Children.Add(detailRow);stack.Children.Add(metadata);BuildTaskDetailUi(stack);BuildUsageEntry(stack);var buttons=new StackPanel{Orientation=Orientation.Horizontal};run=Button("鹈鹕 · "+Label(selectedMode)+" ↗","RunPelican");run.Click+=delegate{Run();};var result=Button("结果 / 设置","Results");result.Click+=delegate{OpenResults();};var refresh=Button("↻","Refresh");refresh.Click+=delegate{Poll();};bench=Text("使用当前配置 · 尚未运行",11);bench.Margin=new Thickness(0,2,0,0);System.Windows.Automation.AutomationProperties.SetAutomationId(bench,"BenchmarkProgress");animationTimer.Tick+=delegate{SampleAnimations();};timer=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(100)};timer.Tick+=delegate{Heartbeats++;DrainClientEvents();DrainCockpitFrame();CheckCockpitLoad();ConsumeRevealRequest();FollowForeground();if(++ticks%10==0){Poll();UpdateTray();}};Loaded+=delegate{if(!testMode)timer.Start();if(!testMode)Poll();if(!fixture&&!testMode)CreateTray();};Closing+=delegate(object sender,System.ComponentModel.CancelEventArgs args){if(fixture||testMode||allowClose)return;args.Cancel=true;HideToTray();};Closed+=delegate{lock(cockpitFrameGate)widgetClosed=true;DisposeTray();DetachPreviewEvents();StopHtml();windowGeneration++;InvalidatePreview();timer.Stop();if(usageWindow!=null)usageWindow.Close();if(settingsWindow!=null)settingsWindow.Close();if(results!=null)results.Close();if(browser!=null)browser.Dispose();client.Dispose();};if(fixture){SetFixture();run.IsEnabled=false;} }
     internal void DrainClientEvents(){RefreshUsageService();ClientEvent e;int count=0;while(count++<8&&client.Dequeue(out e))Apply(e);RequestPendingUsage();if(usageInFlight&&!client.IsInFlight("usage",null)&&!client.HasQueuedEvents){usageInFlight=false;usagePending=true;StartUsageRequest();}}
   Border BuildUsageUi(){
     var surface=new Border{Background=B("#0A0C16"),BorderBrush=B("#333859"),BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(10),Padding=new Thickness(12,8,12,8)};
@@ -193,6 +197,9 @@ public sealed class WidgetWindow:Window {
   void DisposeTray(){StopRevealWatcher();if(tray==null)return;tray.Dispose();tray=null;}
   void ShowFromTray(){
     if(widgetClosed)return;
+    // Asking for the panel explicitly is a decision the follow logic must not
+    // overrule while the user stays in the window they asked from.
+    trayHidden=false;autoHidden=false;pinned=true;
     // Show() unconditionally: the window can be hidden by WPF (our own × button)
     // or by the shell (ShowWindow, task view), and only a Show() clears both.
     Show();
@@ -203,12 +210,100 @@ public sealed class WidgetWindow:Window {
   }
   void HideToTray(){
     if(widgetClosed)return;
-    // Owned windows survive an owner Hide(), so collapse them with the panel;
-    // the tray entries reopen them explicitly.
+    trayHidden=true;autoHidden=false;pinned=false;
+    CollapseWindows();
+  }
+  // Owned windows survive an owner Hide(), so collapse them with the panel;
+  // the tray entries reopen them explicitly.
+  void CollapseWindows(){
     if(usageWindow!=null)usageWindow.Hide();
     if(settingsWindow!=null)settingsWindow.Hide();
     if(results!=null)results.Hide();
     Hide();
+  }
+  // Which process owns the window the user is actually looking at. The widget
+  // is a companion to Codex, so anything else in front means stepping aside.
+  [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  [System.Runtime.InteropServices.DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window,out uint pid);
+  static readonly string[] codexProcesses={"chatgpt","codex"};
+  int selfPid,lastForegroundOwner;bool lastOwnerIsCodex;
+  int SelfPid(){
+    if(selfPid==0){try{using(var me=Process.GetCurrentProcess())selfPid=me.Id;}catch{selfPid=-1;}}
+    return selfPid;
+  }
+  int ForegroundOwner(){
+    try{
+      IntPtr window=GetForegroundWindow();
+      if(window==IntPtr.Zero)return 0;
+      uint pid;
+      if(GetWindowThreadProcessId(window,out pid)==0)return 0;
+      return (int)pid;
+    }catch{return 0;}
+  }
+  // Matching on the process name keeps the check free of file access: reading
+  // another process's image path needs rights that a tray app should not ask
+  // for, and the Codex build ships as its own executable name anyway.
+  static bool IsCodexProcess(int pid){
+    if(pid<=0)return false;
+    try{
+      using(var owner=Process.GetProcessById(pid)){
+        string name=owner.ProcessName;
+        foreach(string candidate in codexProcesses){
+          if(string.Equals(name,candidate,StringComparison.OrdinalIgnoreCase))return true;
+        }
+      }
+    }catch{}
+    return false;
+  }
+  // The panel is shown from ShowDialog(), so following the foreground must not
+  // call Hide(): a hidden modal window takes the process down with it, which is
+  // exactly what a launch in the background used to do. Ghosting keeps the
+  // window alive and polling while it draws nothing and lets every click
+  // through - to the eye and to the mouse it is gone, to the loop it is not.
+  bool ghosted;
+  const int GWL_EXSTYLE=-20;
+  const int WS_EX_TRANSPARENT=0x20, WS_EX_NOACTIVATE=0x8000000;
+  [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)] static extern int GetWindowLong(IntPtr window,int index);
+  [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)] static extern int SetWindowLong(IntPtr window,int index,int value);
+  // Ghosting is opacity plus hit-testing, and nothing else: the window keeps its
+  // size and layout, so coming back needs no relayout and no repaint plumbing.
+  void SetGhost(bool on){
+    if(ghosted==on)return;
+    ghosted=on;
+    try{Opacity=on?0:1;}catch{}
+    IntPtr handle=new System.Windows.Interop.WindowInteropHelper(this).Handle;
+    if(handle==IntPtr.Zero)return;
+    int style=GetWindowLong(handle,GWL_EXSTYLE);
+    // Transparent lets clicks reach whatever is underneath; NoActivate stops a
+    // click that lands here from ever pulling focus off the new foreground.
+    SetWindowLong(handle,GWL_EXSTYLE,on?style|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE
+                                       :style&~(WS_EX_TRANSPARENT|WS_EX_NOACTIVATE));
+    if(!on)try{Topmost=true;}catch{}
+  }
+  void FollowForeground(){
+    // Fixtures and tests assert on IsVisible while the test host owns the
+    // foreground, so following is a production-only behaviour.
+    if(widgetClosed||fixture||testMode)return;
+    int owner=ForegroundOwner();
+    if(owner==0)return;
+    // The user is inside the panel or one of its child windows: that is not a
+    // switch away from Codex, and hiding under their cursor would be hostile.
+    // Recording it as the last owner makes the next real move count as a switch.
+    if(owner==SelfPid()){lastForegroundOwner=owner;return;}
+    bool switched=owner!=lastForegroundOwner;
+    // The process lookup is the only non-trivial cost here, so it runs once per
+    // foreground change rather than on every tick.
+    if(switched){lastForegroundOwner=owner;lastOwnerIsCodex=IsCodexProcess(owner);}
+    if(!lastOwnerIsCodex){
+      // An explicit reveal holds until the user actually moves to another
+      // window; otherwise a tray click would be undone before it was read.
+      if(switched)pinned=false;
+      if(autoHidden||trayHidden||pinned)return;
+      SetGhost(true);
+      autoHidden=true;
+      return;
+    }
+    if(autoHidden){autoHidden=false;SetGhost(false);}
   }
   void ExitFromTray(){
     if(widgetClosed)return;
