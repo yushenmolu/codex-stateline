@@ -300,17 +300,17 @@ $nextRunModes=$window.ModeControl
 $nextRunSummaryControl=$window.GetType().GetField('nextRunSummary',$flags).GetValue($window)
 $nextRunArtwork=$window.GetType().GetField('currentWork',$flags).GetValue($window)
 $nextRunArtworkBefore=$nextRunArtwork.Text
-$nextRunModels.SelectedValue='example-provider/deepseek-v4.1-flash'
-Assert ($nextRunSummaryControl.Text -match 'example-provider/deepseek-v4\.1-flash' -and $nextRunSummaryControl.Text -match '当前配置' -and $nextRunSummaryControl.Text -match 'Cockpit') 'summary lagged behind the model switch'
-Assert ([string]$nextRunModels.ToolTip -ceq 'example-provider/deepseek-v4.1-flash' -and [Windows.Automation.AutomationProperties]::GetHelpText($nextRunModels) -ceq '模型 example-provider/deepseek-v4.1-flash') 'model tooltip or accessible value lagged behind the switch'
+$nextRunModels.SelectedValue='deepseek-v4.1-flash'
+Assert ($nextRunSummaryControl.Text -match 'deepseek-v4\.1-flash' -and $nextRunSummaryControl.Text -match '当前配置' -and $nextRunSummaryControl.Text -match 'Cockpit') 'summary lagged behind the model switch'
+Assert ([string]$nextRunModels.ToolTip -ceq 'deepseek-v4.1-flash' -and [Windows.Automation.AutomationProperties]::GetHelpText($nextRunModels) -ceq '模型 deepseek-v4.1-flash') 'model tooltip or accessible value lagged behind the switch'
 $nextRunEfforts.SelectedValue='high'
-Assert ($nextRunSummaryControl.Text -match 'high' -and $nextRunSummaryControl.Text -match 'example' -and $nextRunSummaryControl.Text -match 'Cockpit') 'summary lagged behind the effort switch'
+Assert ($nextRunSummaryControl.Text -match 'high' -and $nextRunSummaryControl.Text -match 'deepseek' -and $nextRunSummaryControl.Text -match 'Cockpit') 'summary lagged behind the effort switch'
 Assert ([string]$nextRunEfforts.ToolTip -ceq 'high' -and [Windows.Automation.AutomationProperties]::GetHelpText($nextRunEfforts) -ceq '推理强度 high') 'effort tooltip or accessible value lagged behind the switch'
-Assert (@($nextRunModes.ItemsSource).Count -eq 1 -and $nextRunModes.SelectedValue -ceq 'cockpit' -and $nextRunSummaryControl.Text -match 'Cockpit' -and $nextRunSummaryControl.Text -match 'high' -and $nextRunSummaryControl.Text -match 'example') 'next-run controls exposed a removed mode or lost the Cockpit summary'
+Assert (@($nextRunModes.ItemsSource).Count -eq 1 -and $nextRunModes.SelectedValue -ceq 'cockpit' -and $nextRunSummaryControl.Text -match 'Cockpit' -and $nextRunSummaryControl.Text -match 'high' -and $nextRunSummaryControl.Text -match 'deepseek') 'next-run controls exposed a removed mode or lost the Cockpit summary'
 Assert ([string]$nextRunModes.ToolTip -ceq 'cockpit' -and [Windows.Automation.AutomationProperties]::GetHelpText($nextRunModes) -ceq '作品形式 Cockpit 网页动画') 'Cockpit tooltip or accessible mode is incorrect'
 # Switching a value back must land on the final value too, not the previous one.
 $nextRunModels.SelectedValue='configured'
-Assert ($nextRunSummaryControl.Text -match '当前配置' -and $nextRunSummaryControl.Text -notmatch 'example') 'summary kept the previous model after switching back'
+Assert ($nextRunSummaryControl.Text -match '当前配置' -and $nextRunSummaryControl.Text -notmatch 'deepseek') 'summary kept the previous model after switching back'
 Assert ([string]$nextRunModels.ToolTip -ceq 'configured' -and [Windows.Automation.AutomationProperties]::GetHelpText($nextRunModels) -ceq '模型 configured') 'model tooltip kept the previous value after switching back'
 $nextRunEfforts.SelectedValue='configured'
 Assert ($nextRunSummaryControl.Text -match '当前配置' -and $nextRunSummaryControl.Text -match 'Cockpit' -and $nextRunSummaryControl.Text -notmatch '高|SVG') 'summary did not return to the defaults after switching back'
@@ -353,8 +353,8 @@ Assert ($settingsWindow.MinHeight -le $settingsWindow.Height -and $settingsWindo
 Assert ($settingsModels.IsKeyboardFocused -and $settingsModels.SelectedValue -ceq $window.ModelControl.SelectedValue -and $settingsEfforts.SelectedValue -ceq $nextRunEfforts.SelectedValue -and $settingsModes.SelectedValue -ceq $window.ModeControl.SelectedValue) 'settings did not open on the shared draft or focus the first field'
 $settingsModeChoices=@($settingsModes.ItemsSource)
 Assert ($settingsModeChoices.Count -eq 1 -and $settingsModeChoices[0].Value -ceq 'cockpit' -and $settingsModeChoices[0].Enabled -and $settingsModes.SelectedValue -ceq 'cockpit') 'settings did not expose only the available Cockpit mode'
-$settingsModels.SelectedValue='example-provider/deepseek-v4.1-flash';$settingsEfforts.SelectedValue='high'
-Assert ($window.ModelControl.SelectedValue -ceq 'example-provider/deepseek-v4.1-flash' -and $nextRunEfforts.SelectedValue -ceq 'high' -and $window.ModeControl.SelectedValue -ceq 'cockpit' -and $nextRunSummaryControl.Text -match 'example' -and $nextRunSummaryControl.Text -match 'high' -and $nextRunSummaryControl.Text -match 'Cockpit' -and $settingsSummary.Text -ceq $nextRunSummaryControl.Text) 'settings draft did not synchronize to the main controls or summaries'
+$settingsModels.SelectedValue='deepseek-v4.1-flash';$settingsEfforts.SelectedValue='high'
+Assert ($window.ModelControl.SelectedValue -ceq 'deepseek-v4.1-flash' -and $nextRunEfforts.SelectedValue -ceq 'high' -and $window.ModeControl.SelectedValue -ceq 'cockpit' -and $nextRunSummaryControl.Text -match 'deepseek' -and $nextRunSummaryControl.Text -match 'high' -and $nextRunSummaryControl.Text -match 'Cockpit' -and $settingsSummary.Text -ceq $nextRunSummaryControl.Text) 'settings draft did not synchronize to the main controls or summaries'
 $nextRunModels.SelectedValue='configured';$nextRunEfforts.SelectedValue='medium';$nextRunModes.SelectedValue='cockpit'
 Assert ($settingsModels.SelectedValue -ceq 'configured' -and $settingsEfforts.SelectedValue -ceq 'medium' -and $settingsModes.SelectedValue -ceq 'cockpit' -and $settingsSummary.Text -match '当前配置' -and $settingsSummary.Text -match 'medium' -and $settingsSummary.Text -match 'Cockpit') 'main draft changes did not synchronize back to settings'
 $nextRunEfforts.SelectedValue='configured'
@@ -695,9 +695,9 @@ $before=$playbackField.GetValue($window)['animation-w4:pelican-svg-animated'];$n
 Assert ([object]::ReferenceEquals($before,$playbackField.GetValue($window)['animation-w4:pelican-svg-animated'])) 'old window result altered new preview'
 $nextRunEfforts=$window.GetType().GetField('efforts',$flags).GetValue($window)
 $window.FixtureAcceptRun=$true;$window.FixtureRun()
-$captured=[CodexNative.WidgetClient]::Json([CodexNative.WidgetClient]::Serialize($window.SubmittedRequest));$window.ModelControl.SelectedValue='example-provider/gpt-6-astra';$nextRunEfforts.SelectedValue='high'
+$captured=[CodexNative.WidgetClient]::Json([CodexNative.WidgetClient]::Serialize($window.SubmittedRequest));$window.ModelControl.SelectedValue='gpt-6-astra';$nextRunEfforts.SelectedValue='high'
 $capturedAfter=[CodexNative.WidgetClient]::Json([CodexNative.WidgetClient]::Serialize($window.SubmittedRequest))
-Assert ($captured.mode -ceq 'cockpit' -and $capturedAfter.mode -ceq 'cockpit' -and $capturedAfter.model -ceq $captured.model -and $capturedAfter.reasoningEffort -ceq $captured.reasoningEffort -and $window.ModelControl.SelectedValue -ceq 'example-provider/gpt-6-astra' -and $nextRunEfforts.SelectedValue -ceq 'high') 'submitted Cockpit configuration changed with the next-run draft'
+Assert ($captured.mode -ceq 'cockpit' -and $capturedAfter.mode -ceq 'cockpit' -and $capturedAfter.model -ceq $captured.model -and $capturedAfter.reasoningEffort -ceq $captured.reasoningEffort -and $window.ModelControl.SelectedValue -ceq 'gpt-6-astra' -and $nextRunEfforts.SelectedValue -ceq 'high') 'submitted Cockpit configuration changed with the next-run draft'
 $window.FixtureEvent('run','run_active',$null)
 $previewClient=New-Object CodexNative.WidgetClient $true;$clients.Add($previewClient)
 for($i=0;$i -lt 200;$i++){$previewClient.Preview($animated,'bounded',1,$i,'key'+$i);Assert ($previewClient.PreviewQueueDepth -le 2) 'preview queue exceeded active plus one pending'}
@@ -1249,7 +1249,7 @@ $taskSampled='2026-10-15T07:32:15.226Z'
 $taskUpdated='2026-10-15T07:32:13.226Z'
 $taskAgents=@(
     @{id='33333333-3333-4333-8333-000000000001';parentId=$taskAlpha;role='coordinator';model='example-provider/gpt-6.1-sol';effort='ultra';rootTurnId='fixture-turn-0';association='current_turn';state='in_progress';updatedAt=$taskUpdated;usage=@{inputTokens=1234;cachedInputTokens=1000;outputTokens=56;reasoningOutputTokens=12;totalTokens=1290};usageUpdatedAt=$taskUpdated},
-    @{id='33333333-3333-4333-8333-000000000002';parentId=$taskAlpha;role='agency-backend';model='example-provider/deepseek-v4.1-flash';effort='max';rootTurnId='fixture-turn-0';association='current_turn';state='in_progress';updatedAt=$taskUpdated;usage=@{inputTokens=1234;cachedInputTokens=1000;outputTokens=56;reasoningOutputTokens=12;totalTokens=1290};usageUpdatedAt=$taskUpdated},
+    @{id='33333333-3333-4333-8333-000000000002';parentId=$taskAlpha;role='agency-backend';model='deepseek-v4.1-flash';effort='max';rootTurnId='fixture-turn-0';association='current_turn';state='in_progress';updatedAt=$taskUpdated;usage=@{inputTokens=1234;cachedInputTokens=1000;outputTokens=56;reasoningOutputTokens=12;totalTokens=1290};usageUpdatedAt=$taskUpdated},
     @{id='33333333-3333-4333-8333-000000000003';parentId=$taskAlpha;role='reviewer';model='example-provider/gpt-6-astra';effort='high';rootTurnId='fixture-turn-0';association='other_turn';state='completed';updatedAt=$taskUpdated;usage=$null;usageUpdatedAt=$null}
 )
 $taskList=@{tasks=@(@{id=$taskAlpha;title='Fixture Alpha';updatedAt=$taskUpdated},@{id=$taskBeta;title='Fixture Beta';updatedAt=$taskUpdated});sampledAt=$taskSampled;stale=$false;truncated=$false}

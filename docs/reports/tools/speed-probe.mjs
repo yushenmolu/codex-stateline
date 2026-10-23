@@ -1,5 +1,5 @@
-// Read-only probe: inspects benchmark.json structure and magpie usage rows.
-// Usage: node output/speed-probe.mjs bench|magpie [args]
+// Read-only probe: inspects benchmark.json structure and upstream usage rows.
+// Usage: node output/speed-probe.mjs bench|upstream [args]
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -39,7 +39,7 @@ if (MODE === 'bench') {
       caseResults: cr,
     }, null, 2));
   }
-} else if (MODE === 'magpie') {
+} else if (MODE === 'upstream') {
   const url = process.argv[3] ?? 'http://127.0.0.1:3425/v1/magpie/usage/requests?period=30d&limit=500&page=1';
   const res = await fetch(url);
   const json = await res.json();

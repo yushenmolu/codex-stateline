@@ -1,5 +1,5 @@
-// Read-only: locate the magpie upstream rows that belong to one benchmark run.
-// Usage: node output/speed-magpie.mjs <startISO> <endISO> [modelSubstring]
+// Read-only: locate the upstream rows that belong to one benchmark run.
+// Usage: node output/speed-upstream.mjs <startISO> <endISO> [modelSubstring]
 //   startISO/endISO are UTC ISO strings bracketing the run (e.g. the
 //   diagnostics.startedAt / finishedAt of a case).
 // Pages the usage API (limit 500) and keeps rows whose `t` falls in the
@@ -8,7 +8,7 @@ const BASE = 'http://127.0.0.1:3425/v1/magpie/usage/requests';
 
 const [startISO, endISO, modelFilter] = process.argv.slice(2);
 if (!startISO || !endISO) {
-  console.error('usage: node output/speed-magpie.mjs <startISO> <endISO> [modelSubstring]');
+  console.error('usage: node output/speed-upstream.mjs <startISO> <endISO> [modelSubstring]');
   process.exit(2);
 }
 const startMs = Date.parse(startISO);

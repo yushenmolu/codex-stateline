@@ -935,7 +935,7 @@ test('static fallback slugs and legacy aliases resolve only CLI argv', async t =
     assert.equal((await runner.runCase({ model, caseDef: CASES[0] })).answer, '<svg/>');
     assert.equal(runner.budgetMs, 900000);
     if (model === 'configured') assert.equal(argv.includes('--model'), false);
-    else assert.equal(argv[argv.indexOf('--model') + 1], model.startsWith('gpt-') ? 'example-provider/' + model : model);
+    else assert.equal(argv[argv.indexOf('--model') + 1], model);
   }
 });
 
@@ -962,8 +962,8 @@ test('catalog slugs widen the model gate and full Codex efforts pass it', () => 
 test('a catalog-approved slug reaches the CLI verbatim instead of null', async t => {
   const root = await mkdtemp(join(tmpdir(), 'runner-catalog-argv-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const catalog = ['example-provider/gpt-6-astra', 'example-provider/gpt-6.1-sol', 'example-provider/kimi-k3'].map(slug => ({ slug, displayName: slug }));
-  for (const model of ['example-provider/gpt-6-astra', 'example-provider/gpt-6.1-sol', 'example-provider/kimi-k3']) {
+  const catalog = ['example-provider2/gpt-6-astra', 'example-provider2/gpt-6.1-sol', 'example-provider/kimi-k3'].map(slug => ({ slug, displayName: slug }));
+  for (const model of ['example-provider2/gpt-6-astra', 'example-provider2/gpt-6.1-sol', 'example-provider/kimi-k3']) {
     let argv;
     const runner = createRunner({ tempRoot: root, modelPolicy: catalog, spawnImpl: (_exe, args) => {
       argv = args;

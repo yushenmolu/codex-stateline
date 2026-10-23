@@ -255,7 +255,7 @@ child.once('close', (code, signalName) => { exitConfirmed = true; ... });
 | `node output/run-pelican-cockpit.mjs <model> <effort>` | 正式驱动：`/api/nonce` → `POST /api/benchmark/run` → 3 s 轮询到终态 |
 | `node output/speed-wrap.mjs <model> <effort> <log>` | 在驱动外套一层 `[+NNNms]` 时间戳与 `EXIT wallMs=`，用于 wall-clock 计时 |
 | `node output/speed-extract.mjs <seq\|runId>` | 从 `%LOCALAPPDATA%\codex-companion\benchmark.json` 精确提取单个 run 的 diagnostics |
-| `node output/speed-magpie.mjs <startISO> <endISO> [model]` | 按时间窗口从中转 usage 里筛出 codex 的行 |
+| `node output/speed-upstream.mjs <startISO> <endISO> [model]` | 按时间窗口从中转 usage 里筛出 codex 的行 |
 | `node output/speed-pollfast.mjs <log> [250]` | 250 ms 高频轮询 `/api/benchmark`，记录状态翻转时刻（测尾部的关键） |
 | `node output/speed-runner-tail.mjs <label> <caseId> [model] [effort]` | 隔离跑 `createRunner`，证明 runner 自身开销 |
 | `node output/speed-cli-tail.mjs <label> [--no-notify]` | 裸 codex CLI 尾部 A/B（notify 钩子影响） |

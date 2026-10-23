@@ -14,34 +14,70 @@ export const MIN_TIMEOUT_MS = 60000;
 export const MAX_TIMEOUT_MS = 900000;
 export const TIMEOUT_ENV_KEY = 'CODEX_STATELINE_PELICAN_TIMEOUT_MS';
 // Legacy short names the desktop panel used before the catalog became the
-// source of truth. They only map to a canonical slug; they never widen what
-// the current configuration allows.
-const LEGACY_MODEL_ALIASES = new Map([['gpt-6-astra', 'example-provider/gpt-6-astra'], ['gpt-6.1-sol', 'example-provider/gpt-6.1-sol']]);
+// source of truth. A short name carries no provider, so the provider is taken
+// from the catalog at hand rather than baked in here: any provider that serves
+// the model resolves, and none is privileged.
+const LEGACY_SHORT_NAMES = ['gpt-6-astra', 'gpt-6.1-sol'];
+// The families the fallback gate admits. It is keyed on the model, never the
+// provider: a catalog that fails to load must not strand whichever provider the
+// user happens to be routing through, and a new provider needs no code change.
+const FALLBACK_FAMILIES = new Set(['gpt-6-astra', 'gpt-6.1-sol', 'deepseek-v4.1-flash']);
 // Static fallback, used only while the catalog is unavailable, so a missing or
 // unreadable catalog cannot lock the panel out of the models Codex still runs.
-export const APPROVED_MODELS = new Set([MODEL_SENTINEL, 'example-provider/gpt-6-astra', 'example-provider/gpt-6.1-sol', 'example-provider/deepseek-v4.1-flash', 'gpt-6-astra', 'gpt-6.1-sol']);
+export const APPROVED_MODELS = new Set([MODEL_SENTINEL, ...FALLBACK_FAMILIES]);
+// The family a slug names, ignoring whichever provider prefixes it.
+function modelFamily(model) {
+  const slash = model.lastIndexOf('/');
+  return slash < 0 ? model : model.slice(slash + 1);
+}
+function staticModelAllowed(model) {
+  if (model === MODEL_SENTINEL) return true;
+  return typeof model === 'string' && validModel(model) && FALLBACK_FAMILIES.has(modelFamily(model));
+}
+// The provider a bare short name belongs to, discovered from the catalog
+// instead of assumed: the single provider that serves that short name wins, and
+// an ambiguous or absent catalog leaves the short name alone.
+function shortNameProvider(shortName, availableModels) {
+  const values = policyValues(availableModels, 'slug');
+  if (values === null) return null;
+  const owners = new Set();
+  for (const slug of values) {
+    if (!validModel(slug)) continue;
+    const slash = slug.lastIndexOf('/');
+    if (slash > 0 && slug.slice(slash + 1) === shortName) owners.add(slug.slice(0, slash));
+  }
+  return owners.size === 1 ? owners.values().next().value : null;
+}
+function aliasSlug(shortName, availableModels) {
+  const provider = shortNameProvider(shortName, availableModels);
+  return provider === null ? null : provider + '/' + shortName;
+}
 export const EFFORTS = new Set([MODEL_SENTINEL, ...Array.from(EFFORT_VALUES)]);
-export function resolveBenchmarkModel(model) {
+export function resolveBenchmarkModel(model, availableModels = null) {
   if (typeof model !== 'string') return null;
   if (model === MODEL_SENTINEL) return MODEL_SENTINEL;
   if (!validModel(model)) return null;
-  const canonical = LEGACY_MODEL_ALIASES.get(model) ?? model;
+  const canonical = canonicalModel(model, availableModels);
+  if (canonical === null) return null;
   // Without a catalog policy the static fallback still bounds what can run.
-  return APPROVED_MODELS.has(model) || APPROVED_MODELS.has(canonical) ? canonical : null;
+  return staticModelAllowed(model) || staticModelAllowed(canonical) ? canonical : null;
 }
 // The CLI argument for an already-policy-checked model. Catalog slugs outside
 // the static fallback must still reach the CLI verbatim: passing null would be
 // stringified to "--model null", silently running a different model than the
 // one the run records.
-export function benchmarkModelArgument(model) {
-  return canonicalModel(model);
+export function benchmarkModelArgument(model, availableModels = null) {
+  return canonicalModel(model, availableModels);
 }
 // Identifier-shaped models resolve to their canonical slug even when they are
 // not yet in the static set; catalog membership decides their policy fate.
-function canonicalModel(model) {
+function canonicalModel(model, availableModels = null) {
   if (model === MODEL_SENTINEL) return MODEL_SENTINEL;
   if (typeof model !== 'string' || !validModel(model)) return null;
-  return LEGACY_MODEL_ALIASES.get(model) ?? model;
+  if (!LEGACY_SHORT_NAMES.includes(model)) return model;
+  // A short name stays itself unless the catalog proves which provider owns it,
+  // so an unknown catalog never invents a provider-qualified slug.
+  return aliasSlug(model, availableModels) ?? model;
 }
 // The credential policy may arrive as the payload shape ({slug} / {value}) or
 // as bare wire strings; anything else is ignored instead of trusted.
@@ -61,9 +97,10 @@ function policyValues(policy, key) {
 export function modelAllowlist(availableModels = null) {
   const values = policyValues(availableModels, 'slug');
   if (values === null) return null;
+  // Only the catalog's own slugs. The sentinel-only case stays distinguishable so
+  // the caller can fall back on families rather than on a fixed set of vendors.
   const allowed = new Set([MODEL_SENTINEL]);
   for (const slug of values) if (validModel(slug)) allowed.add(slug);
-  if (allowed.size === 1) for (const model of APPROVED_MODELS) allowed.add(model);
   return allowed;
 }
 export function effortAllowlist(availableEfforts = null) {
@@ -75,10 +112,13 @@ export function effortAllowlist(availableEfforts = null) {
   return allowed;
 }
 export function isAllowedModel(model, availableModels = null) {
-  const canonical = canonicalModel(model);
+  const canonical = canonicalModel(model, availableModels);
   if (canonical === null) return false;
   const allowed = modelAllowlist(availableModels);
-  if (allowed === null) return APPROVED_MODELS.has(model) || APPROVED_MODELS.has(canonical);
+  if (allowed === null) return staticModelAllowed(model) || staticModelAllowed(canonical);
+  // A catalog that contributed nothing beyond the sentinel leaves the fallback
+  // families in play for every provider, not just the ones spelled out above.
+  if (allowed.size === 1) return staticModelAllowed(model) || staticModelAllowed(canonical);
   return allowed.has(model) || allowed.has(canonical);
 }
 export function isAllowedEffort(effort, availableEfforts = null) {
@@ -402,7 +442,7 @@ export function createRunner({ executable = resolveExecutable(), spawnImpl = spa
           '-c', 'mcp_servers={}',
           '-c', 'web_search="disabled"', '-c', 'developer_instructions=' + JSON.stringify(GENERATION_INSTRUCTIONS)];
         if (model !== 'configured') {
-          const argvModel = benchmarkModelArgument(model);
+          const argvModel = benchmarkModelArgument(model, models);
           if (argvModel === null) throw failWith('invalid_config');
           args.push('--model', argvModel);
         }
