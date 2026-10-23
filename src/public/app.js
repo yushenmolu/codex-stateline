@@ -22,7 +22,11 @@ function caseErrorText(code) { return caseErrors[code] ?? ''; }
 function message(text, error=false) { $('benchmark-message').textContent=text; $('benchmark-message').className='message'+(error?' error':''); }
 const safeCount = v => Number.isSafeInteger(v) && v >= 0;
 const validModel = v => typeof v === 'string' && v.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(v);
-const effortLabels = { low:'low', medium:'medium', high:'high', xhigh:'xhigh', max:'max', ultra:'ultra' };
+const effortLabels = { low:'low', medium:'medium', high:'high', xhigh:'xhigh', max:'max', ultra:'ultra', persistent:'persistent', none:'none' };
+// Codex owns the reasoning vocabulary; an unfamiliar level is still a level, so it
+// renders with its wire word instead of being reported as unknown.
+const validEffort = v => typeof v === 'string' && v !== 'configured' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(v);
+const effortLabel = v => effortLabels[v] ?? v;
 const available = (v,source) => v?.state === 'available' && v.source === source && v.reason === 'none';
 const utcTime = v => typeof v === 'string' && /(?:Z|\+00:00)$/.test(v) && Number.isFinite(Date.parse(v));
 function validTurn(turn) {
@@ -45,8 +49,8 @@ function setTelemetry(value) {
   $('speed').textContent=speedOk?format(rate):'—';
   $('speed').title='最近完成回合平均输出 tokens/s，含工具及等待'+(speedOk?'':'；'+detail);
   const context=data.conversationContext;
-  const contextOk=data.state==='ok'&&available(context,'turn_context')&&validModel(context.model)&&Object.hasOwn(effortLabels,context.reasoningEffort)&&utcTime(context.observedAt);
-  $('conversation-context').textContent='最近活动主会话 · '+(contextOk?'日志模型 '+context.model+' · 推理强度 '+context.reasoningEffort+'('+effortLabels[context.reasoningEffort]+')':'日志模型 / 推理强度未知');
+  const contextOk=data.state==='ok'&&available(context,'turn_context')&&validModel(context.model)&&validEffort(context.reasoningEffort)&&utcTime(context.observedAt);
+  $('conversation-context').textContent='最近活动主会话 · '+(contextOk?'日志模型 '+context.model+' · 推理强度 '+context.reasoningEffort+'('+effortLabel(context.reasoningEffort)+')':'日志模型 / 推理强度未知');
   $('session-id').textContent=data.state==='ok'&&typeof data.session?.id==='string'?'会话 '+data.session.id:'';
   $('telemetry-message').textContent=reason==='bootstrap_in_progress'?'正在读取主会话历史，完成后显示最近完成回合。':({ok:'显示最近完成回合的输入/输出/总计与均速；会话按主会话日志活动选择。',empty:'暂无活动主会话。',ambiguous:'多个候选主会话，暂不显示计数。',unavailable:'遥测不可用，请检查本地服务。'})[data.state]??'遥测不可用。';
   const connected=['ok','empty','ambiguous'].includes(data.state)||reason==='bootstrap_in_progress';
@@ -75,7 +79,7 @@ function renderAgents(rows,truncated=false){
     const role=typeof a.role==='string'&&a.role.trim()?a.role.trim():'未知';
     const model=typeof a.model==='string'&&a.model.trim()?a.model.trim():'未观测';
     const effort=typeof a.effort==='string'&&a.effort.trim()?a.effort.trim():null;
-    const detail=role+' · 日志模型 '+model+' · 推理强度 '+(effort?effort+'('+(effortLabels[effort]??'未知')+')':'未观测')+' · '+agentStateText(a.state)+' · '+associationText(a.association);
+    const detail=role+' · 日志模型 '+model+' · 推理强度 '+(effort?effort+'('+effortLabel(effort)+')':'未观测')+' · '+agentStateText(a.state)+' · '+associationText(a.association);
     const row=element('p','agent-row',role+' · '+shortModel(a.model)+' · '+agentStateText(a.state)+' · '+associationText(a.association));
     row.title=detail;
     return row;

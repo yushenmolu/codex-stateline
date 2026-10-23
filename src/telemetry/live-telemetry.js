@@ -132,8 +132,10 @@ export function createLiveTelemetry({ connector = null, wallClock = () => Date.n
       thread.lifecycle = event.state === 'active'
         ? { state: 'running', startedAt: null, completedAt: null, elapsedSeconds: null }
         : event.state === 'idle' ? { state: 'completed', startedAt: null, completedAt: null, elapsedSeconds: null } : null;
-      if (Object.hasOwn(event, 'model')) thread.model = liveModel(event.model);
-      if (Object.hasOwn(event, 'reasoningEffort')) thread.reasoningEffort = validEffort(event.reasoningEffort) ? event.reasoningEffort : null;
+      // A reported level that fails validation says nothing about the level that
+      // is actually running, so the confirmed one stays rather than blinking out.
+      if (Object.hasOwn(event, 'model')) thread.model = liveModel(event.model) ?? thread.model;
+      if (Object.hasOwn(event, 'reasoningEffort')) thread.reasoningEffort = validEffort(event.reasoningEffort) ? event.reasoningEffort : thread.reasoningEffort;
       if (event.state === 'active') thread.speedTracker.observe(thread.id, total, observedAt);
       else thread.speedTracker.reset();
     } else if (event.type === 'thread') {

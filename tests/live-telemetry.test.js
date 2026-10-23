@@ -258,11 +258,19 @@ test('the runtime model survives a turn start and unvalidated values never fill 
   s.emit({ type: 'turn_started', threadId: THREAD, turnId: TURN, startedAt: new Date(NOW).toISOString() });
   assert.equal(s.live.snapshot().model, 'example-provider/gpt-6.1-sol');
   assert.equal(s.live.snapshot().reasoningEffort, 'ultra');
-  s.emit({ type: 'conversation', threadId: THREAD, primary: true, state: 'active', usage: USAGE, model: 'configured', reasoningEffort: 'turbo' });
-  assert.equal(s.live.snapshot().model, null);
-  assert.equal(s.live.snapshot().reasoningEffort, null);
+  // An unusable report says nothing about what is running, so the confirmed pair
+  // stays: a provider switch must not blank a level that was already observed.
+  s.emit({ type: 'conversation', threadId: THREAD, primary: true, state: 'active', usage: USAGE, model: 'configured', reasoningEffort: 'bad level!' });
+  assert.equal(s.live.snapshot().model, 'example-provider/gpt-6.1-sol');
+  assert.equal(s.live.snapshot().reasoningEffort, 'ultra');
+  // A level this build has never seen is still a level Codex chose.
+  s.emit({ type: 'conversation', threadId: THREAD, primary: true, state: 'active', usage: USAGE, model: 'example-provider/gpt-6.1-sol', reasoningEffort: 'turbo' });
+  assert.equal(s.live.snapshot().model, 'example-provider/gpt-6.1-sol');
+  assert.equal(s.live.snapshot().reasoningEffort, 'turbo');
+  // Absent is not the same as invalid: a report without the keys keeps both.
   s.emit({ type: 'conversation', threadId: THREAD, primary: true, state: 'active', usage: USAGE });
-  assert.equal(s.live.snapshot().model, null);
+  assert.equal(s.live.snapshot().model, 'example-provider/gpt-6.1-sol');
+  assert.equal(s.live.snapshot().reasoningEffort, 'turbo');
 });
 
 test('unverified ancestry cannot silently become the unique active primary', () => {

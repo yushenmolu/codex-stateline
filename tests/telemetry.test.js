@@ -1652,13 +1652,25 @@ test('W1 file replacement and split UTF8 cannot retain another file turn', async
 
 test('W1 malformed contexts never borrow fields from prior turn', () => {
   const rows = turnRows();
-  for (const [patch, reason] of [[{ effort: undefined }, 'context_missing'], [{ model: 'unsafe//model' }, 'context_invalid'], [{ effort: 'unknown' }, 'context_invalid']]) {
+  // Codex owns the reasoning vocabulary, so only a malformed level is rejected -
+  // an unfamiliar word is a level a provider really used and must survive.
+  for (const [patch, reason] of [[{ effort: undefined }, 'context_missing'], [{ model: 'unsafe//model' }, 'context_invalid'], [{ effort: 'not a level' }, 'context_invalid'], [{ effort: 'configured' }, 'context_invalid']]) {
     const context = JSON.parse(rows[2]); Object.assign(context.payload, patch);
     const result = projectRows([rows[0], rows[1], JSON.stringify(context), ...rows.slice(3)]);
     assert.equal(result.conversationContext.reason, reason);
     assert.equal(result.conversationContext.model, null);
     assert.equal(result.conversationContext.reasoningEffort, null);
   }
+});
+
+test('W1 an unfamiliar reasoning level is still runtime evidence', () => {
+  const context = JSON.parse(turnRows()[2]);
+  context.payload.effort = 'turbo';
+  context.payload.model = 'example-provider/gpt-6.1-sol';
+  const result = projectRows([turnRows()[0], turnRows()[1], JSON.stringify(context), ...turnRows().slice(3)]);
+  assert.equal(result.conversationContext.reason, 'none');
+  assert.equal(result.conversationContext.model, 'example-provider/gpt-6.1-sol');
+  assert.equal(result.conversationContext.reasoningEffort, 'turbo');
 });
 
 function oversizedIgnoredRecord(type, bytes, text = 'SYNTHETIC_BODY_MARKER') {

@@ -511,12 +511,16 @@ ContextFixture
 Assert ($window.ContextVisible -and $window.ContextText -match 'gpt-6.1-sol' -and $window.MetricControls[3].Text -eq (9310/1520.559).ToString('N1')) 'frozen telemetry context/turn average not displayed'
 # Fresh invalid model/effort stay unknown independently; seeded fields retain their last valid value.
 ResetTelemetryFixture $window
-$context.reasoningEffort='not-a-level'
+$context.reasoningEffort='not a level'
 ContextFixture
 Assert ($window.ContextVisible -and $window.ContextText -match 'gpt-6.1-sol' -and $window.EffortVisible -and $window.EffortText -match '未知') ('unknown effort hid a known model: visible='+$window.ContextVisible+' text='+$window.ContextText+' effortVisible='+$window.EffortVisible+' effort='+$window.EffortText)
 $context.reasoningEffort='max';ContextFixture
-$context.reasoningEffort='not-a-level';ContextFixture
+$context.reasoningEffort='not a level';ContextFixture
 Assert ($window.ContextText -match 'gpt-6.1-sol' -and $window.EffortText -match 'max' -and $window.SelectedUsageStateControl.Text -match '上次有效数据') 'invalid effort erased a seeded valid effort or historical provenance'
+# Codex owns the reasoning vocabulary: a level this build has never heard of is still
+# the level that ran, so it is shown with its wire word instead of being dropped.
+$context.reasoningEffort='turbo';ContextFixture
+Assert ($window.EffortText -match 'turbo') 'unfamiliar provider reasoning level was treated as unknown'
 ResetTelemetryFixture $window
 $context.model='not a model';$context.reasoningEffort='max'
 ContextFixture
@@ -2306,7 +2310,7 @@ foreach($fault in $badObservedCases){
 }
 ApplyLiveFixture (LiveSample)
 Assert ($liveWindow.MetricControls[3].Text -ceq '2.0' -and $liveSpeedCaption.Text -ceq '请求均速 token/s' -and $liveWindow.MetricControls[3].ToolTip -match '已确认请求') 'confirmed request speed compatibility failed after observed-window samples'
-$badLiveCases=@('source','source-none','scope','identity','identity-newline','sum','negative','unsafe-integer','string-count','agents','model','configured-model','effort','configured-effort','speed-source','speed-future','speed-negative','lifecycle','lifecycle-time','reason','observedAt','sampledAt')
+$badLiveCases=@('source','source-none','scope','identity','identity-newline','sum','negative','unsafe-integer','string-count','agents','speed-source','speed-future','speed-negative','lifecycle','lifecycle-time','reason','observedAt','sampledAt')
 foreach($fault in $badLiveCases){
  $badLive=LiveSample
  switch($fault){
@@ -2320,10 +2324,6 @@ foreach($fault in $badLiveCases){
   'unsafe-integer' {$badLive.usage.inputTokens=9007199254740992;$badLive.usage.outputTokens=0;$badLive.usage.totalTokens=9007199254740992}
   'string-count' {$badLive.usage.totalTokens='42'}
   'agents' {$badLive.usage.includesSubagents='false'}
-  'model' {$badLive.model='private model diagnostics'}
-  'configured-model' {$badLive.model='configured'}
-  'effort' {$badLive.reasoningEffort='highest'}
-  'configured-effort' {$badLive.reasoningEffort='configured'}
   'speed-source' {$badLive.speed.source='completed_turn'}
   'speed-future' {$badLive.speed.observedAt='2026-10-18T09:00:06.000Z'}
   'speed-negative' {$badLive.speed.outputTokensPerSecond=-1}

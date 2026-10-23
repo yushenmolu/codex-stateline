@@ -84,10 +84,16 @@ export function sessionFilenameIdentity(filename) {
   return match ? { id: match[1], dual: Boolean(match[2]) } : null;
 }
 export const validModel = (v) => typeof v === 'string' && v.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(v);
-// Every reasoning level Codex accepts in `enabled-reasoning-efforts`; the
-// whitelist also keeps an arbitrary string out of `-c model_reasoning_effort=`.
-export const EFFORT_VALUES = Object.freeze(['none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'persistent']);
-export const validEffort = (v) => typeof v === 'string' && EFFORT_VALUES.includes(v);
+const EFFORT_NAMES = Object.freeze(['none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'persistent']);
+// Codex decides which reasoning levels exist: the model catalog lists them per
+// model and `enabled-reasoning-efforts` selects among them, so a new provider can
+// bring a word this build has never heard of. Validity is therefore the shape of a
+// level name, not membership of a list - the guard only has to keep an arbitrary
+// string out of `-c model_reasoning_effort=`. EFFORT_VALUES stays as the ladder the
+// selectors sort by; the long tail is authoritative from the catalog instead.
+// `configured` is a request sentinel, never evidence of the level that ran.
+export const EFFORT_VALUES = Object.freeze([...EFFORT_NAMES]);
+export const validEffort = (v) => typeof v === 'string' && v !== 'configured' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(v);
 const validId = (v) => typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v);
 export function unavailableTelemetry(reason = 'no_session', state = 'unavailable', sources = {}) {
   return {
