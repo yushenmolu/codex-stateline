@@ -657,3 +657,102 @@ test('desktop observed speed survives confirmed updates slower than the old thir
   assert.equal(s.peer.destroyed, true, 'bounded refresh still re-verifies source identity');
   assert.equal(s.live.snapshot({ taskId: THREAD }).speed, null);
 });
+
+// The peer announces a conversation once. A reader that pins nothing depends entirely
+// on that announcement, so an announced disconnect that cleared the candidate list
+// used to leave it re-opening the pipe with nothing to ask about: the card stayed
+// blank until the user happened to switch tasks by hand.
+test('an unpinned reader rediscovers the announced conversation after an announced disconnect', (t) => {
+  const s = setup(t, { leaseMs: 20_000, reconnectMs: 10 }, { telemetry: true });
+  s.ready(null);
+  s.interest(THREAD);
+  s.owner(); s.snapshot(1);
+  assert.equal(s.live.snapshot().usage.inputTokens, USAGE.inputTokens);
+
+  // The peer drops the pipe. Every subscription is gone with it.
+  s.peer.receive({ type: 'broadcast', method: 'ipc-connection-reset', params: {}, sourceClientId: OWNER });
+  s.flush();
+  assert.equal(s.live.snapshot().state, 'disconnected');
+  assert.deepEqual(s.statuses.at(-1), { connected: false, source: 'codex_app_server', reason: 'source_disconnected' });
+
+  // Reconnecting must ask about the remembered conversation again, without any new
+  // announcement from the peer.
+  s.advance(20); s.flush();
+  s.peer.emit('connect');
+  s.reply(s.request('initialize'), { clientId: CLIENT });
+  assert.ok(s.request('thread-owner-discovery', THREAD), 'the remembered conversation is discovered again');
+  s.owner(); s.snapshot(2, { latestTokenUsageInfo: { total: { inputTokens: 300, outputTokens: 60, totalTokens: 360 } } });
+  s.flush();
+  assert.equal(s.live.snapshot().state, 'available');
+  assert.equal(s.live.snapshot().usage.inputTokens, 300);
+});
+
+test('a planned refresh keeps an unpinned reader able to rediscover its announced conversation', (t) => {
+  const s = setup(t, { refreshMs: 3_000, leaseMs: 60_000 }, { telemetry: true });
+  s.ready(null);
+  s.interest(THREAD);
+  s.owner(); s.snapshot(1);
+  assert.equal(s.live.snapshot().usage.inputTokens, USAGE.inputTokens);
+
+  for (let i = 0; i < 2; i++) { s.advance(1_000); s.live.snapshot(); s.flush(); }
+  s.advance(1_100); s.live.snapshot(); s.flush();
+  assert.equal(s.peer.destroyed, true, 'the planned refresh still re-verifies the pipe');
+
+  s.advance(20); s.peer.emit('connect');
+  s.reply(s.request('initialize'), { clientId: CLIENT });
+  assert.ok(s.request('thread-owner-discovery', THREAD), 'the planned refresh rediscovers the announced conversation');
+  s.owner();
+  s.live.snapshot(); s.flush();
+  assert.equal(s.live.snapshot().state, 'available');
+});
+
+// A failed owner discovery is not proof the conversation is gone: the peer can be busy
+// or the user can switch threads mid-handshake. Observed live, forgetting the id on one
+// failure left the card permanently blank while a turn was running, so the id must
+// survive and be asked about again.
+test('a failed owner discovery keeps the conversation remembered for the next reconnect', (t) => {
+  const s = setup(t, { leaseMs: 20_000, reconnectMs: 10 }, { telemetry: true });
+  s.ready(null);
+  s.interest(THREAD);
+  s.owner(); s.snapshot(1);
+
+  s.peer.receive({ type: 'broadcast', method: 'ipc-connection-reset', params: {}, sourceClientId: OWNER });
+  s.flush();
+  s.advance(20); s.flush(); s.peer.emit('connect');
+  s.reply(s.request('initialize'), { clientId: CLIENT });
+
+  const discovery = s.request('thread-owner-discovery', THREAD);
+  s.peer.receive({ type: 'response', requestId: discovery.requestId, method: 'thread-owner-discovery',
+    resultType: 'error', handledByClientId: OWNER, result: {} });
+  s.flush();
+  assert.deepEqual(s.statuses.at(-1), { connected: false, source: 'codex_app_server', reason: 'identity_unverified' });
+
+  s.advance(20); s.flush(); s.peer.emit('connect');
+  s.reply(s.request('initialize'), { clientId: CLIENT });
+  assert.ok(s.request('thread-owner-discovery', THREAD), 'the conversation is asked about again after the failure');
+  s.owner(); s.snapshot(2, { latestTokenUsageInfo: { total: { inputTokens: 300, outputTokens: 60, totalTokens: 360 } } });
+  s.flush();
+  assert.equal(s.live.snapshot().state, 'available');
+  assert.equal(s.live.snapshot().usage.inputTokens, 300);
+});
+
+// Remembering what the peer announced is what lets an unpinned reader come back, but
+// the memo must not grow with the user's whole history: it would cost one discovery
+// per past conversation on every reconnect.
+test('the remembered announcements stay bounded and drop the oldest conversation', (t) => {
+  const s = setup(t, { leaseMs: 20_000, reconnectMs: 10, maxCandidates: 2 }, { telemetry: true });
+  s.ready(null);
+  const ids = ['123e4567-e89b-42d3-a456-426614170010', '123e4567-e89b-42d3-a456-426614170011',
+    '123e4567-e89b-42d3-a456-426614170012'];
+  for (const id of ids) s.interest(id);
+
+  s.peer.receive({ type: 'broadcast', method: 'ipc-connection-reset', params: {}, sourceClientId: OWNER });
+  s.flush();
+  s.advance(20); s.flush(); s.peer.emit('connect');
+  s.reply(s.request('initialize'), { clientId: CLIENT });
+
+  assert.equal(s.request('thread-owner-discovery', ids[0]), undefined, 'the oldest announcement is gone');
+  assert.ok(s.request('thread-owner-discovery', ids[1]));
+  assert.ok(s.request('thread-owner-discovery', ids[2]));
+});
+

@@ -101,6 +101,23 @@ export function createDesktopLiveConnector({
     let socket = null, clientId = null, stopped = false, started = false, timer = null;
     let buffer = Buffer.alloc(0), selected = null, lastRead = null, openedAt = null, retryAt = 0, ready = false;
     const candidates = new Map(), requests = new Map();
+    // The peer announces a conversation once and never repeats the announcement, so a
+    // reader that pins nothing learns about threads only through those one-shot
+    // broadcasts. Forgetting them across a disconnect left the reader re-opening the
+    // pipe with nothing to ask about: it waited for a snapshot that could not arrive
+    // and stayed blank until the reader happened to switch tasks by hand. The peer
+    // drops our subscriptions with the socket, so every remembered id is asked for
+    // again after initialize. Remembering every id ever announced would grow without
+    // bound and cost one discovery per id on each reconnect, so the memo is held to
+    // the same ceiling as the candidate list and the oldest announcement is the one
+    // to go: a conversation announced long ago is the least likely to still be the
+    // one being watched.
+    const discovered = new Set();
+    function remember(id) {
+      if (discovered.has(id)) return;
+      discovered.add(id);
+      while (discovered.size > maxCandidates) discovered.delete(discovered.values().next().value);
+    }
 
     function send(message) {
       if (!socket || socket.destroyed || !socket.writable) return;
@@ -120,12 +137,17 @@ export function createDesktopLiveConnector({
       for (const [id, pending] of requests) if (pending.threadId === entry.id) requests.delete(id);
       observe({ type: 'removed', threadId: entry.id });
     }
+    function forget(id) { discovered.delete(id); }
     // An announced disconnect releases everything: the source is gone, so its
     // snapshots are no longer trustworthy. A planned refresh is different. It keeps
     // the candidate list, because the peer drops our subscriptions with the socket
     // and a reader that forgot every thread here would blink out every refresh
     // interval. live-telemetry's stale window still bounds a refresh that never
     // completes, so a broken source cannot be papered over by a stale card.
+    // The announced disconnect still keeps `discovered`: those ids came from the
+    // peer's own one-shot announcements, and re-asking about them after reconnecting
+    // is the only way back. Identity and revision checks still gate whatever they
+    // return.
     function disconnect(reason = 'source_disconnected', { announce = true } = {}) {
       const old = socket;
       requests.clear();
@@ -194,6 +216,10 @@ export function createDesktopLiveConnector({
         requests.delete(message.requestId);
         if (message.method !== pending.method || message.resultType !== 'success') {
           if (pending.method === 'initialize') disconnect('source_unavailable');
+          // A failed discovery is not proof the conversation is gone: the peer can be
+          // busy, or the user can switch threads mid-handshake. Forgetting the id here
+          // once left the reader permanently blank, so it stays remembered and is asked
+          // for again after the next reconnect. The memo ceiling bounds that cost.
           else disconnect('identity_unverified');
           return;
         }
@@ -201,6 +227,10 @@ export function createDesktopLiveConnector({
           if (typeof message.result?.clientId !== 'string' || message.result.clientId.length > 256) return disconnect('source_invalid');
           clientId = message.result.clientId;
           if (selected !== null && !candidates.has(selected)) candidate(selected);
+          // A pinned task survives in `candidates`, a discovered one survives only in
+          // `discovered` because the announced disconnect cleared the candidates. Both
+          // need the peer asked again: the socket took every subscription with it.
+          for (const id of discovered) if (!candidates.has(id)) candidate(id);
           // After a planned refresh the pins survive but the subscriptions did not,
           // so every retained owner is asked again for the stream.
           for (const entry of candidates.values()) if (entry.owner) follow(entry, true);
@@ -223,11 +253,14 @@ export function createDesktopLiveConnector({
       if (!object(params) || params.hostId !== 'local' || !UUID.test(params.conversationId ?? '')) return;
       if (message.method === 'thread-stream-following-changed' && message.version === 1 && message.sourceClientId !== clientId) {
         if (selected !== null) return;
-        if (params.following === true) candidate(params.conversationId, message.sourceClientId);
+        if (params.following === true) { remember(params.conversationId); candidate(params.conversationId, message.sourceClientId); }
         else if (params.following === false) {
           const entry = candidates.get(params.conversationId);
           entry?.interests.delete(message.sourceClientId);
           if (entry && entry.interests.size === 0) remove(entry);
+          // The peer's own reader dropped the conversation, so it is not worth asking
+          // about after the next reconnect either.
+          if (!entry || entry.interests.size === 0) forget(params.conversationId);
         }
         return;
       }
