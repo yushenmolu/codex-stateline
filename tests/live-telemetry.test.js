@@ -182,6 +182,31 @@ test('live falls back to the freshest idle conversation inside the retention win
   assert.equal(s.live.snapshot().reason, 'no_active_thread');
 });
 
+test('an unpinned card still reports a conversation whose last turn failed', () => {
+  const s = setup(); s.connect();
+  s.emit({ type: 'conversation', threadId: THREAD, primary: true, state: 'failed', usage: USAGE, model: 'other-provider/kimi-k3', reasoningEffort: 'high' });
+  // The runtime reports `systemError` for a session that merely ended badly, so the
+  // conversation the reader just received a full snapshot of must still be the one
+  // an unpinned card describes. Reporting "no active thread" here blanked the card
+  // while the socket was healthy.
+  const failed = s.live.snapshot();
+  assert.equal(failed.state, 'available');
+  assert.equal(failed.reason, null);
+  assert.equal(failed.session.id, THREAD);
+  assert.deepEqual(failed.usage, { scope: 'conversation', includesSubagents: false, ...USAGE });
+  assert.equal(failed.model, 'other-provider/kimi-k3');
+  assert.equal(failed.reasoningEffort, 'high');
+  assert.equal(s.live.snapshot({ taskId: THREAD }).usage.totalTokens, 120);
+  // An active conversation still outranks a failed one.
+  s.emit({ type: 'conversation', threadId: OTHER, primary: true, state: 'active', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } });
+  assert.equal(s.live.snapshot().session.id, OTHER);
+  // Past the retention window the failed conversation stops standing in.
+  s.emit({ type: 'removed', threadId: OTHER });
+  s.advance(300_001);
+  s.emit({ type: 'heartbeat' });
+  assert.equal(s.live.snapshot().reason, 'no_active_thread');
+});
+
 test('live keeps the most recent request counters and degrades a dirty request group to unknown', () => {
   const s = setup(); s.connect(); s.thread(); s.turn();
   const last = { inputTokens: 40, outputTokens: 8, totalTokens: 48, cachedInputTokens: 30, reasoningOutputTokens: 2 };

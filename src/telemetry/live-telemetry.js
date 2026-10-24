@@ -195,6 +195,18 @@ export function createLiveTelemetry({ connector = null, wallClock = () => Date.n
         thread = idle.reduce((best, entry) => (!best || Date.parse(entry.observedAt) > Date.parse(best.observedAt) ? entry : best), null);
         if (thread?.primary === null) return unavailableLiveSnapshot('identity_unverified', now, 'unavailable', source);
       }
+      // A conversation whose last turn failed is still the conversation the card
+      // should describe: its counters and model are confirmed history, and the
+      // runtime reports `systemError` for a session that merely ended badly. Leaving
+      // it out of the fallback made an unpinned card report "no active thread" for a
+      // conversation it had just received a full snapshot of, which is exactly the
+      // blank card that made the source look dead while the socket was healthy.
+      if (!thread) {
+        const settled = [...threads.values()].filter((entry) => entry.primary !== false && entry.state === 'failed'
+          && now - Date.parse(entry.observedAt) <= idleRetentionMs);
+        thread = settled.reduce((best, entry) => (!best || Date.parse(entry.observedAt) > Date.parse(best.observedAt) ? entry : best), null);
+        if (thread?.primary === null) return unavailableLiveSnapshot('identity_unverified', now, 'unavailable', source);
+      }
     }
     if (!thread || (taskId === null ? thread.primary !== true : thread.primary === false)) return unavailableLiveSnapshot(taskId ? 'thread_not_observed' : 'no_active_thread', now, 'unavailable', source);
     return publicLiveSnapshot({
