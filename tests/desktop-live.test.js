@@ -500,10 +500,14 @@ test('selection changes unsubscribe the old thread and ignore late snapshots', (
   assert.equal(s.conversations.at(-1).threadId, OTHER);
   s.connector.select(OTHER);
   assert.equal(s.follows(OTHER).length, 1);
+  // Unpinning releases nothing: the card polls without a task id whenever nothing is
+  // pinned, so dropping the subscription there made the two poll shapes fight. The
+  // reader stays connected and stays subscribed, and the confirmed conversation keeps
+  // being reported instead of blanking out on every other poll.
   s.connector.select(null);
-  assert.equal(s.follows(OTHER).at(-1).params.following, false);
-  assert.equal(s.peer.destroyed, true);
-  assert.equal(s.statuses.at(-1).connected, false);
+  assert.equal(s.follows(OTHER).at(-1).params.following, true);
+  assert.equal(s.peer.destroyed, false);
+  assert.equal(s.statuses.at(-1).connected, true);
 });
 
 test('disconnect and stop release subscriptions, reject old sockets and stop reconnecting', (t) => {
@@ -658,6 +662,41 @@ test('desktop observed speed survives confirmed updates slower than the old thir
   assert.equal(s.live.snapshot({ taskId: THREAD }).speed, null);
 });
 
+// A snapshot carries the whole conversation, so on a long session it arrives as one
+// frame of tens of megabytes spread over seconds of socket reads. A real 39.45 MB
+// frame was measured at 4704 ms against the 5000 ms retention window, so the card
+// dropped to "实时接口已断连" exactly when the transcript grew past that point. The
+// deadline has to follow the peer's progress, not the age of the wait.
+test('a snapshot still arriving keeps the retention window open while a stalled one expires', (t) => {
+  const body = Buffer.from(JSON.stringify({ type: 'broadcast', method: 'thread-stream-state-changed',
+    version: 11, sourceClientId: OWNER, targetClientIds: [CLIENT],
+    params: { conversationId: THREAD, hostId: 'local', change: { type: 'snapshot', revision: 1,
+      conversationState: { id: THREAD, threadRuntimeStatus: { type: 'active', activeFlags: [] },
+        latestTokenUsageInfo: { total: USAGE, last: LAST } } } } }), 'utf8');
+  const bytes = Buffer.concat([Buffer.from([0, 0, 0, 0]), body]);
+  bytes.writeUInt32LE(body.length, 0);
+
+  // The transfer below deliberately spans tens of seconds of wall clock, so the HTTP
+  // lease has to sit above it: this test is about the snapshot deadline, not the lease.
+  const s = setup(t, { leaseMs: 100_000 });
+  s.ready(THREAD); s.owner();
+  for (let offset = 0; offset < bytes.length; offset += 16) {
+    s.advance(1_000);
+    s.peer.emit('data', bytes.subarray(offset, offset + 16));
+    assert.equal(s.peer.destroyed, false, 'a frame that keeps arriving must not expire mid-transfer');
+  }
+  s.flush();
+  assert.equal(s.peer.destroyed, false);
+  assert.equal(s.conversations.at(-1)?.threadId, THREAD, 'the completed frame is still applied');
+
+  const stalled = setup(t, { leaseMs: 100_000 });
+  stalled.ready(THREAD); stalled.owner();
+  stalled.peer.emit('data', bytes.subarray(0, 16));
+  stalled.advance(5_001); stalled.flush();
+  assert.equal(stalled.peer.destroyed, true, 'a peer that stops mid-frame is still released');
+  assert.equal(stalled.statuses.at(-1).reason, 'source_unavailable');
+});
+
 // The peer announces a conversation once. A reader that pins nothing depends entirely
 // on that announcement, so an announced disconnect that cleared the candidate list
 // used to leave it re-opening the pipe with nothing to ask about: the card stayed
@@ -754,5 +793,83 @@ test('the remembered announcements stay bounded and drop the oldest conversation
   assert.equal(s.request('thread-owner-discovery', ids[0]), undefined, 'the oldest announcement is gone');
   assert.ok(s.request('thread-owner-discovery', ids[1]));
   assert.ok(s.request('thread-owner-discovery', ids[2]));
+});
+
+// A snapshot on a long conversation is tens of megabytes and arrives in thousands of
+// chunks. Assembling it by appending each chunk to a growing Buffer with Buffer.concat
+// copies the whole accumulated frame per chunk, so the total copied work is quadratic
+// in the frame size: a real 39 MB snapshot copied tens of gigabytes and blocked the
+// event loop for a measured 9139 ms, which outlived the 8 s HTTP lease and is what
+// made the card blink to "实时接口已断连" with every field blank. The reader therefore
+// reserves each frame once and copies every chunk into it, so no concatenation is ever
+// handed a buffer that grows with the frame.
+test('a large frame is assembled without concatenating the accumulated bytes', (t) => {
+  const s = setup(t, { leaseMs: 100_000 });
+  s.ready(THREAD); s.owner();
+
+  // A payload big enough that re-concatenating it per chunk is unmistakable: the old
+  // implementation handed Buffer.concat a growing buffer and this test sees it.
+  const filler = 'x'.repeat(1 << 20);
+  const body = Buffer.from(JSON.stringify({ type: 'broadcast', method: 'thread-stream-state-changed',
+    version: 11, sourceClientId: OWNER, targetClientIds: [CLIENT],
+    params: { conversationId: THREAD, hostId: 'local', change: { type: 'snapshot', revision: 1,
+      conversationState: { id: THREAD, threadRuntimeStatus: { type: 'active', activeFlags: [] },
+        latestTokenUsageInfo: { total: USAGE, last: LAST }, filler } } } }), 'utf8');
+  const bytes = Buffer.concat([Buffer.from([0, 0, 0, 0]), body]);
+  bytes.writeUInt32LE(body.length, 0);
+  assert.ok(bytes.length > (1 << 20), 'the frame under test is genuinely large');
+
+  // Watch every concatenation the reader performs. Accumulating the frame would show up
+  // as a growing first argument; reserving it once shows up as nothing larger than the
+  // four byte length prefix.
+  const largest = [];
+  const concat = Buffer.concat;
+  Buffer.concat = function watched(list, ...rest) {
+    if (Array.isArray(list) && list.length > 0) largest.push(list[0].length);
+    return concat.call(Buffer, list, ...rest);
+  };
+  t.after(() => { Buffer.concat = concat; });
+
+  const chunk = 1 << 14;
+  for (let offset = 0; offset < bytes.length; offset += chunk) {
+    s.peer.emit('data', bytes.subarray(offset, offset + chunk));
+  }
+  s.flush();
+
+  assert.equal(s.peer.destroyed, false);
+  assert.equal(s.conversations.at(-1)?.threadId, THREAD, 'the completed frame is still applied');
+  assert.ok(largest.length > 0, 'the reader still assembles the length prefix');
+  assert.ok(Math.max(...largest) <= 4,
+    `no concatenation may carry accumulated frame bytes, but the largest was ${Math.max(...largest)} bytes`);
+});
+
+// The card polls /api/live without a task id while nothing is pinned, and with one
+// once the user picks a task. Treating the unpinned poll as "watch nothing" and
+// closing the socket there made the two poll shapes fight: each unpinned poll tore
+// down the connection the pinned poll had just opened, so the card alternated
+// between a value and "实时接口已断连" and never settled.
+test('polling without a pinned task keeps the connection that a pinned poll opened', (t) => {
+  const s = setup(t, { leaseMs: 100_000 }, { telemetry: true });
+  s.subscribe(THREAD);
+  const opened = s.peer;
+  assert.equal(s.live.snapshot({ taskId: THREAD }).state, 'available');
+  assert.equal(opened.destroyed, false);
+
+  // The unpinned poll that follows every pinned one must not close anything.
+  const unpinned = s.live.snapshot();
+  assert.equal(opened.destroyed, false);
+  assert.equal(s.statuses.at(-1).connected, true);
+  // It keeps observing the conversation the peer announced, so the card still has
+  // something to show and does not have to redo the handshake on the next poll.
+  assert.equal(s.follows(THREAD).at(-1).params.following, true);
+  assert.equal(unpinned.state, 'available');
+  assert.equal(unpinned.session.id, THREAD);
+
+  // Going back to a pinned poll reuses the same healthy connection and the same
+  // subscription instead of opening a second socket or re-arming the handshake.
+  assert.equal(s.live.snapshot({ taskId: THREAD }).state, 'available');
+  assert.equal(s.sockets.length, 1);
+  assert.equal(s.peer, opened);
+  assert.equal(s.follows(THREAD).length, 1);
 });
 

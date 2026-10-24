@@ -9,7 +9,7 @@ const object = (value) => value && typeof value === 'object' && !Array.isArray(v
 const count = (value) => Number.isSafeInteger(value) && value >= 0;
 const safePath = (value) => (typeof value === 'string' && value.length <= 256 && !['__proto__', 'prototype', 'constructor'].includes(value))
   || (Number.isSafeInteger(value) && value >= 0 && value <= 100_000);
-const FIELDS = new Set(['latestTokenUsageInfo', 'latestModel', 'latestReasoningEffort', 'threadRuntimeStatus', 'source', 'threadSource', 'parentThreadId', 'ephemeral', 'sideConversation']);
+const FIELDS = new Set(['latestTokenUsageInfo', 'latestModel', 'latestReasoningEffort', 'threadRuntimeStatus', 'source', 'threadSource', 'parentThreadId', 'ephemeral', 'sideConversation', 'latestThreadSettings']);
 // The three confirmed counters gate the whole usage; the cache counters are optional.
 const USAGE_KEYS = ['inputTokens', 'outputTokens', 'totalTokens', 'cachedInputTokens', 'reasoningOutputTokens'];
 
@@ -48,7 +48,14 @@ function field(key, value) {
   if (key === 'parentThreadId') return UUID.test(value ?? '') ? value : null;
   if (key === 'threadSource') return value === 'ambient_suggestions' ? value : null;
   if (key === 'latestModel') return validModel(value) ? value : null;
+  // `latestReasoningEffort` is the field the runtime is documented to fill, but a
+  // real app-server conversation reported it as null on every snapshot while the
+  // effort was plainly `ultra` in the settings it echoed alongside. Keeping only
+  // the documented field left the card saying 推理强度 · 未确认 for a conversation
+  // whose strength was known, so the settings copy is retained as the fallback and
+  // the documented field still wins whenever it is present.
   if (key === 'latestReasoningEffort') return validEffort(value) ? value : null;
+  if (key === 'latestThreadSettings') return { effort: validEffort(value?.effort) ? value.effort : null };
   return typeof value === 'boolean' ? value : null;
 }
 
@@ -88,18 +95,42 @@ function applyPatch(state, patch) {
     else if (path[1] === 'activeFlags') state[key].activeFlags = [];
     return true;
   }
+  // The effort lives one level down in the settings echo, and the runtime patches
+  // that object in place, so a whole-object snapshot is not the only way it moves.
+  if (key === 'latestThreadSettings') {
+    if (path.length === 2 && path[1] === 'effort') state[key] = field(key, { effort: patch.value });
+    return true;
+  }
   // A changed ancestry field needs a fresh snapshot rather than guessing its meaning.
   return false;
 }
 
 export function createDesktopLiveConnector({
   pipePath = PIPE, connect = (path) => net.createConnection(path), wallClock = () => Date.now(),
-  now = () => performance.now(), maxFrameBytes = 32 * 1024 * 1024, maxCandidates = 8,
+  // A full snapshot frame carries the whole conversation, so its size grows with
+  // the transcript rather than staying bounded by the counters we keep. A real
+  // 34.6 MB snapshot was measured on a long session; the previous 32 MiB ceiling
+  // dropped exactly those frames, and because a drop tears the socket down the
+  // reader reconnected only to be handed a still-larger snapshot, which is why
+  // the card blinked to "实时接口已断连" instead of settling on a value. The
+  // ceiling therefore has to sit well above an ordinary transcript, and it stays
+  // a fail-closed guard against a hostile length prefix, not a size policy.
+  now = () => performance.now(), maxFrameBytes = 128 * 1024 * 1024, maxCandidates = 8,
   leaseMs = 8_000, refreshMs = 120_000, reconnectMs = 1_000, discoverySettleMs = 500,
 } = {}) {
   return ({ status, observe }) => {
     let socket = null, clientId = null, stopped = false, started = false, timer = null;
-    let buffer = Buffer.alloc(0), selected = null, lastRead = null, openedAt = null, retryAt = 0, ready = false;
+    let selected = null, lastRead = null, openedAt = null, retryAt = 0, ready = false;
+    // The reader assembles one frame at a time into a single preallocated buffer.
+    // Appending each chunk to a growing Buffer with Buffer.concat copies the whole
+    // accumulated frame on every chunk, so a 39 MB snapshot arriving in a few
+    // thousand chunks copied tens of gigabytes and blocked the event loop for a
+    // measured 9139 ms -- long past the 8 s contact lease, which is what actually
+    // made the card blink to "实时接口已断连" and drop every field. Reserving the
+    // announced length once and copying each chunk into it brought the same
+    // snapshot down to a 145 ms worst case. `head` holds the incomplete length
+    // prefix, `frame` the frame being filled, and `filled` how much of it is here.
+    let head = Buffer.alloc(0), frame = null, filled = 0;
     const candidates = new Map(), requests = new Map();
     // The peer announces a conversation once and never repeats the announcement, so a
     // reader that pins nothing learns about threads only through those one-shot
@@ -163,7 +194,7 @@ export function createDesktopLiveConnector({
           entry.retained = entry.state !== null;
         }
       }
-      socket = null; clientId = null; ready = false; buffer = Buffer.alloc(0);
+      socket = null; clientId = null; ready = false; head = Buffer.alloc(0); frame = null; filled = 0;
       old?.destroy(); retryAt = now() + reconnectMs;
       if (announce) status({ connected: false, source: SOURCE, reason });
     }
@@ -195,7 +226,7 @@ export function createDesktopLiveConnector({
       observe({ type: 'conversation', threadId: entry.id, primary: primary(value),
         state: runtime === 'active' ? 'active' : runtime === 'systemError' ? 'failed' : 'idle',
         usage: usageState(value.latestTokenUsageInfo), model: value.latestModel ?? null,
-        reasoningEffort: value.latestReasoningEffort ?? null, observedAt: new Date(wallClock()).toISOString() });
+        reasoningEffort: value.latestReasoningEffort ?? value.latestThreadSettings?.effort ?? null, observedAt: new Date(wallClock()).toISOString() });
     }
     function resync(entry) {
       ready = false;
@@ -299,14 +330,42 @@ export function createDesktopLiveConnector({
         active.on('connect', () => { if (socket === active) request('initialize', { clientType: 'desktop' }, 0); });
         active.on('data', (chunk) => {
           if (socket !== active) return;
-          buffer = Buffer.concat([buffer, chunk]);
-          while (buffer.length >= 4 && socket === active) {
-            const length = buffer.readUInt32LE(0);
-            if (length === 0 || length > maxFrameBytes) return disconnect('capacity_exceeded');
-            if (buffer.length < length + 4) return;
-            const frame = buffer.subarray(4, length + 4);
-            buffer = buffer.length === length + 4 ? Buffer.alloc(0) : Buffer.from(buffer.subarray(length + 4));
-            try { handle(JSON.parse(frame.toString('utf8'))); } catch { return disconnect('source_invalid'); }
+          let offset = 0;
+          while (offset < chunk.length && socket === active) {
+            if (!frame) {
+              // Collect just the 4-byte length prefix, then reserve the frame once.
+              if (head.length < 4) {
+                const want = Math.min(4 - head.length, chunk.length - offset);
+                head = Buffer.concat([head, chunk.subarray(offset, offset + want)]);
+                offset += want;
+                if (head.length < 4) return;
+              }
+              const length = head.readUInt32LE(0);
+              if (length === 0 || length > maxFrameBytes) return disconnect('capacity_exceeded');
+              frame = Buffer.allocUnsafe(length + 4);
+              head.copy(frame, 0);
+              filled = 4;
+              head = Buffer.alloc(0);
+            }
+            const want = Math.min(frame.length - filled, chunk.length - offset);
+            chunk.copy(frame, filled, offset, offset + want);
+            filled += want;
+            offset += want;
+            // A snapshot frame carries the whole conversation, so on a long session it is
+            // tens of megabytes and takes seconds to arrive. A real 39.45 MB frame was
+            // measured at 4704 ms end to end against a 5000 ms retention window, leaving
+            // 296 ms of margin, which is why the card dropped to "实时接口已断连" whenever
+            // the transcript grew past that point. The deadline therefore has to measure
+            // how long the peer has been silent rather than how long the wait has been
+            // open: every chunk that advances an incomplete frame renews it, while a peer
+            // that stalls mid-frame stops producing chunks and expires exactly as before.
+            if (filled < frame.length) {
+              for (const entry of candidates.values()) if (!entry.state || entry.retained) entry.deadline = now() + 5_000;
+              return;
+            }
+            const complete = frame;
+            frame = null; filled = 0;
+            try { handle(JSON.parse(complete.subarray(4).toString('utf8'))); } catch { return disconnect('source_invalid'); }
           }
         });
         active.on('error', () => { if (socket === active) disconnect('source_unavailable'); });
@@ -344,11 +403,17 @@ export function createDesktopLiveConnector({
       select(taskId) {
         if (stopped || (taskId !== null && !UUID.test(taskId ?? ''))) return;
         lastRead = now();
-        if (selected !== taskId) {
-          for (const entry of [...candidates.values()]) remove(entry);
-          selected = taskId;
-          if (selected === null && socket) disconnect();
-        }
+        // Follow mode is a reader that watches whatever the peer announces, not a
+        // reader that watches nothing, so unpinning tears nothing down: the card polls
+        // /api/live without a task id whenever nothing is pinned, and releasing the
+        // candidate there dropped the confirmed counters, re-armed the handshake and
+        // reported the source as gone, which blanked the card on every other poll.
+        // Switching from one pinned task to a different one replaces the target,
+        // because that conversation is genuinely no longer the one being described.
+        // Pinning, unpinning and re-pinning the same task all keep the candidates:
+        // dropping them re-armed the handshake and blanked the card on every poll.
+        if (selected !== null && taskId !== null && selected !== taskId) for (const entry of [...candidates.values()]) remove(entry);
+        selected = taskId;
         if (clientId && selected !== null) candidate(selected);
         if (!socket && now() >= retryAt) open();
       },
