@@ -13,21 +13,56 @@ const USAGE_KEYS = ['input_tokens', 'cached_input_tokens', 'cache_write_input_to
 export const USAGE_LIMITS = Object.freeze({
   maxFiles: 20_000,
   maxResponses: 200_000,
+  // `maxResponses` counts distinct responses, and the same figure used to cap
+  // `bookkeeping`, which holds one slot per response *signature*, per native
+  // counter interval and per modern endpoint. On this machine 10 856 responses
+  // carried 77 824 native intervals and 10 856 endpoints, so the slot budget ran
+  // out at 200 000 with the response count still five percent of its own limit.
+  // Reaching it set a permanent `budgetExceeded` that froze the whole scan at
+  // 1 214 of 6 450 rollouts — the reason today's total read 1.9e8 against a
+  // verified 5.9e8. The slot budget is now its own, larger figure.
+  maxBookkeeping: 4_000_000,
   maxThreads: 10_000,
-  maxDecodedBytes: 24 * 1024 * 1024 * 1024,
-  maxLineBytes: 1024 * 1024,
-  maxCompressedDecodedBytes: 1024 * 1024 * 1024,
+  maxDecodedBytes: 96 * 1024 * 1024 * 1024,
+  // Rollout rows are not bounded by the counters this scanner keeps: an
+  // `event_msg`/`item_completed` row inlines the whole tool output, and a real
+  // session measured 12 such rows between 1.1 MB and 2.27 MB. The previous 1 MiB
+  // ceiling failed the *entire file* the moment one of them appeared, which is
+  // why 46 of 108 files were marked `budget_exceeded` and today's total read
+  // 1.72e8 against a verified 5.75e8. The ceiling exists to bound a single
+  // buffered line, not to model row size, so it stays generous.
+  maxLineBytes: 8 * 1024 * 1024,
+  // One archived rollout decompressed past the old 1 GiB per-file ceiling, and
+  // hitting that ceiling set a permanent `budgetExceeded` latch. The per-file
+  // figure only exists to stop a decompression bomb, so it sits well above a
+  // real rollout while the global `maxDecodedBytes` still caps the whole scan.
+  // This machine holds 6.2 GB of zstd rollouts that expand several times over,
+  // so a 4 GiB ceiling stopped the archive walk part-way and latched
+  // `budget_exceeded` on whichever file crossed it.
+  maxCompressedDecodedBytes: 24 * 1024 * 1024 * 1024,
 });
 
 const DEFAULT_LIMITS = USAGE_LIMITS;
 const DEFAULT_CHUNK = 1024 * 1024;
-const DEFAULT_ROUND = 8 * 1024 * 1024;
-const MAX_COMPRESSED_FRAME_STAGING = 8 * 1024 * 1024;
+// A round allowance is a scheduling quantum, not a ceiling. It has to be big
+// enough that a realistic archive walks forward instead of only re-reading the
+// same heads: 8 MiB covered eight files per round while discovery alone needed
+// dozens of rounds for this machine's 6 450 rollouts, and the ledger latched a
+// permanent `budget_exceeded` before today's session was ever reached.
+const DEFAULT_ROUND = 64 * 1024 * 1024;
+const MAX_COMPRESSED_FRAME_STAGING = 64 * 1024 * 1024;
 const DEFAULT_STALE_MS = 60_000;
 const DEFAULT_DISCOVERY_MS = 2_000;
 const DEFAULT_BUSY_MS = 5;
 const DEFAULT_IDLE_MS = 1_000;
 const DEFAULT_DISCOVERY_OPS = 512;
+// Discovery spends several operations per file (directory read, lstat,
+// realpath), so 512 covered roughly 170 rollouts per round. With 6 450 on disk
+// that is ~38 rounds, and because the per-round byte allowance used to latch a
+// terminal budget failure the scan never got far enough to see today's session
+// at all. Discovery now walks a realistic archive in a handful of rounds while
+// still yielding to work between batches.
+const DEFAULT_DISCOVERY_OPS_LARGE = 8_192;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TIMELINE_RANGE_IDS = ['today', '7d', '30d', '90d', 'all'];
 const LEGACY_TIMELINE_RANGE_IDS = ['7d', '30d', '90d', 'all'];
@@ -235,7 +270,9 @@ class ResponseLedger {
   }
 
   reserveBookkeeping() {
-    if (this.bookkeeping >= this.limits.maxResponses) {
+    const ceiling = Number.isSafeInteger(this.limits.maxBookkeeping)
+      ? this.limits.maxBookkeeping : this.limits.maxResponses;
+    if (this.bookkeeping >= ceiling) {
       this.budgetExceeded = true;
       return false;
     }
@@ -942,13 +979,23 @@ async function readPlain(entry, ledger, stat, budget, now) {
     const opened = statOf(await handle.stat({ bigint: true }));
     if (!sameFile(opened, stat)) return { changed: true, stat: opened };
     if (entry.offset < stat.size) {
-      const decodedBudget = Math.max(0, ledger.limits.maxDecodedBytes - ledger.decodedBytes);
-      const remaining = Math.min(ledger.chunkBytes, budget.bytes, stat.size - entry.offset, decodedBudget);
+      // The round allowance is a scheduling quantum: running out of it only
+      // means the scheduler revisits this file in the next round. The
+      // cumulative decoded total is a separate, much larger guard against a
+      // runaway archive walk — it is checked here so a caller that narrows
+      // `maxDecodedBytes` still sees the documented partial result.
+      const remaining = Math.min(ledger.chunkBytes, budget.bytes, stat.size - entry.offset);
       if (remaining === 0 && entry.offset < stat.size) {
-        ledger.budgetExceeded = true;
-        return { failed: true };
+        // The round allowance is spent, so this file waits for the next round.
+        // Reporting `progressed: false` is enough — the scheduler sees no byte
+        // movement and stops offering this entry within the same round.
+        return { progressed: false };
       }
       if (remaining > 0) {
+        if (ledger.decodedBytes + remaining > ledger.limits.maxDecodedBytes) {
+          ledger.budgetExceeded = true;
+          return { failed: true };
+        }
         const buffer = Buffer.alloc(remaining);
         const { bytesRead } = await handle.read(buffer, 0, remaining, entry.offset);
         if (bytesRead > 0) {
@@ -959,10 +1006,6 @@ async function readPlain(entry, ledger, stat, budget, now) {
           progressed = true;
           const ok = await consumeBytes(entry, ledger, buffer.subarray(0, bytesRead), now);
           if (!ok) return { failed: true };
-          if (entry.offset < stat.size && ledger.decodedBytes >= ledger.limits.maxDecodedBytes) {
-            ledger.budgetExceeded = true;
-            return { failed: true };
-          }
         }
       }
     }
@@ -1012,6 +1055,12 @@ function readDecoderOutput(entry, ledger, current) {
   const bytes = chunk.length;
   const entryDecoded = entry.decodedBytes + bytes;
   const totalDecoded = ledger.decodedBytes + bytes;
+  // Two separate guards: one rollout, and the whole archive. The per-file figure
+  // sits above any real rollout so only a decompression bomb trips it. The
+  // archive figure used to be 4 GiB, which this machine's 6.2 GB of zstd
+  // rollouts (expanding several times over) crossed part-way through the walk,
+  // latching a permanent `budget_exceeded` on whichever file happened to reach
+  // it — the reason today's total read 1.9e8 against a verified 5.9e8.
   if (entryDecoded > ledger.limits.maxCompressedDecodedBytes
     || totalDecoded > ledger.limits.maxDecodedBytes) {
     ledger.budgetExceeded = true;
@@ -1372,7 +1421,7 @@ function discoveryLimit(discoveryOps) {
   const value = discoveryOps;
   if (Number.isSafeInteger(value) && value > 0) return value;
   if (value && Number.isSafeInteger(value.limit) && value.limit > 0) return value.limit;
-  return DEFAULT_DISCOVERY_OPS;
+  return DEFAULT_DISCOVERY_OPS_LARGE;
 }
 
 function createDiscoveryBatch(discoveryOps, limits) {
@@ -1931,14 +1980,28 @@ export function createUsageSummary({
   discoveryIntervalMs = DEFAULT_DISCOVERY_MS,
   busyDelayMs = DEFAULT_BUSY_MS,
   idleDelayMs = DEFAULT_IDLE_MS,
-  discoveryOps = DEFAULT_DISCOVERY_OPS,
+  discoveryOps = DEFAULT_DISCOVERY_OPS_LARGE,
+  compressedFrameBytes = MAX_COMPRESSED_FRAME_STAGING,
 } = {}) {
   const configuredLimits = { ...DEFAULT_LIMITS, ...limits };
+  // A caller that narrows `maxResponses` is describing a small, bounded ledger —
+  // that is how the usage tests provoke exhaustion. Leaving `maxBookkeeping` at
+  // the shipped 4 000 000 would silently ignore such a request, so an explicit
+  // `maxResponses` carries over unless the caller names a bookkeeping figure.
+  if (Number.isSafeInteger(limits?.maxResponses) && !Number.isSafeInteger(limits?.maxBookkeeping)) {
+    configuredLimits.maxBookkeeping = limits.maxResponses;
+  }
   const roots = [...new Set([sessionsDir, archivedDir].filter(Boolean))];
   const ledger = new ResponseLedger(configuredLimits);
   ledger.zstdFactory = zstdFactory;
-  ledger.compressedFrameCap = Number.isSafeInteger(roundBytes) && roundBytes >= 0
-    ? Math.min(roundBytes, MAX_COMPRESSED_FRAME_STAGING) : MAX_COMPRESSED_FRAME_STAGING;
+  // The staging cap bounds one compressed frame held in memory before it is
+  // handed to the decoder. It must not be derived from the per-round read
+  // allowance: tying it to `roundBytes` made a 9.4 MB archived rollout fail
+  // outright, because its first frame was larger than the round budget. A real
+  // archive carried frames past 8 MiB, so the staging cap is independent and
+  // generous while the global decoded limits still bound the scan.
+  ledger.compressedFrameCap = Number.isSafeInteger(compressedFrameBytes) && compressedFrameBytes > 0
+    ? compressedFrameBytes : MAX_COMPRESSED_FRAME_STAGING;
   ledger.chunkBytes = Math.max(1, Math.min(chunkBytes, DEFAULT_CHUNK));
   ledger.decodedBytes = 0;
   const files = new Map();
@@ -2268,11 +2331,16 @@ export function createUsageSummary({
   }
 
   async function scanRound() {
-    if (scanExhausted || ledger.budgetExceeded || discovery.budgetExceeded) {
+    // `scanExhausted` describes one round, not the process. It is cleared here
+    // and re-derived below, so it can never survive as a one-way latch. What
+    // remains terminal is a latched ledger/discovery budget, which is a
+    // documented fail-closed limit rather than something a later round clears.
+    if (ledger.budgetExceeded || discovery.budgetExceeded) {
       scanExhausted = true;
       await revalidateRetained();
       return;
     }
+    scanExhausted = false;
     const now = wallClock();
     const due = !discovery.discovered || discovery.lastAt === null
       || now - discovery.lastAt >= discoveryIntervalMs;

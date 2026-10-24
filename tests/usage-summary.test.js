@@ -2263,6 +2263,7 @@ test('frame staging cap rejects an oversized compressed frame without retaining 
   const summary = createSummary(sessionsDir, archivedDir, {
     chunkBytes: 32,
     roundBytes: 32 * 1024,
+    compressedFrameBytes: 32 * 1024,
   });
   t.after(() => summary.stop());
   await settle(summary, 100, ROOT);
@@ -2291,6 +2292,7 @@ test('a frame staging failure keeps discovering and counting later valid files',
   const decoders = [];
   const summary = createSummary(sessionsDir, archivedDir, {
     roundBytes: cap,
+    compressedFrameBytes: cap,
     discoveryOps: 4,
     zstdFactory: () => {
       const decoder = zlib.createZstdDecompress();
@@ -2371,6 +2373,7 @@ test('a frame staging failure rolls back counted prefixes and refunds decoded by
   const summary = createSummary(sessionsDir, archivedDir, {
     chunkBytes: cap,
     roundBytes: cap,
+    compressedFrameBytes: cap,
     limits: { maxDecodedBytes: Buffer.byteLength(prefixRows) },
     zstdFactory: () => {
       const decoder = zlib.createZstdDecompress();
@@ -2425,7 +2428,9 @@ test('global hard caps still stop scanning after a file-local frame failure', {
     await t.test(name, async (caseT) => {
       const { sessionsDir, archivedDir } = await fixture(caseT);
       await writeFile(join(archivedDir, filename(ROOT, true)), oversized);
-      const summary = createSummary(sessionsDir, archivedDir, { roundBytes: cap, limits });
+      const summary = createSummary(sessionsDir, archivedDir, {
+        roundBytes: cap, compressedFrameBytes: cap, limits,
+      });
       caseT.after(() => summary.stop());
       await settle(summary, 20);
       assert.equal(summary.snapshot().overall.coverage.failedFiles, 1);
