@@ -11,8 +11,8 @@ import { createTelemetryWorker } from '../src/telemetry/speed-worker.js';
 const id = '123e4567-e89b-12d3-a456-426614174000';
 const iso = '2026-10-11T00:00:00.000Z';
 const now = Date.parse(iso);
-const underscoreRollout = 'rollout-2026-10-11T21-07-12-01a125f5-8300-71a2-bf15-b2817aef108b_01a12b13-126d-74b2-801d-fc4fbf0bc28c.jsonl';
-const underscoreSessionId = '01a125f5-8300-71a2-bf15-b2817aef108b';
+const underscoreRollout = 'rollout-2026-10-11T21-07-12-aaaaaaaa-8300-71a2-bf15-000000000001_bbbbbbbb-126d-74b2-801d-fc4fbf0bc28c.jsonl';
+const underscoreSessionId = 'aaaaaaaa-8300-71a2-bf15-000000000001';
 
 test('dual UUID filenames accept underscore and hyphen with strict UUID validation', () => {
   for (const name of [underscoreRollout, underscoreRollout.replace('_', '-')]) {
