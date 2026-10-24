@@ -11,7 +11,7 @@ import { createTelemetryWorker } from '../src/telemetry/speed-worker.js';
 const id = '123e4567-e89b-12d3-a456-426614174000';
 const iso = '2026-10-11T00:00:00.000Z';
 const now = Date.parse(iso);
-const underscoreRollout = 'rollout-2026-10-11T21-07-12-aaaaaaaa-8300-71a2-bf15-000000000001_bbbbbbbb-126d-74b2-801d-fc4fbf0bc28c.jsonl';
+const underscoreRollout = 'rollout-2026-10-11T21-07-12-aaaaaaaa-8300-71a2-bf15-000000000001_bbbbbbbb-126d-74b2-801d-cccccccccccc.jsonl';
 const underscoreSessionId = 'aaaaaaaa-8300-71a2-bf15-000000000001';
 
 test('dual UUID filenames accept underscore and hyphen with strict UUID validation', () => {
@@ -26,7 +26,7 @@ test('dual UUID filenames accept underscore and hyphen with strict UUID validati
     underscoreRollout.replace('74b2', '04b2'),
     underscoreRollout.replace('bf15', '7f15'),
     underscoreRollout.replace('801d', '701d'),
-    underscoreRollout.replace('fc4fbf0bc28c', 'fc4fbf0bc28g'),
+    underscoreRollout.replace('cccccccccccc', 'fc4fbf0bc28g'),
     underscoreRollout.replace('.jsonl', '_extra.jsonl'),
   ]) {
     assert.equal(sessionIdFromFilename(name), null, name);
