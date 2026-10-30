@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -14,9 +14,26 @@ export function createStore({ filePath = join(process.env.LOCALAPPDATA ?? proces
     for (const run of data.runs ?? []) if (['queued', 'running'].includes(run.status)) run.status = 'interrupted';
     return data;
   }
-  async function save() { const tmp = filePath + '.tmp-' + randomUUID(); await writeFile(tmp, JSON.stringify(data), 'utf8'); await rename(tmp, filePath); }
+  async function save(value) {
+    const tmp = filePath + '.tmp-' + randomUUID();
+    try {
+      await writeFile(tmp, JSON.stringify(value), 'utf8');
+      await rename(tmp, filePath);
+    } finally {
+      await rm(tmp, { force: true }).catch(() => {});
+    }
+  }
   function mutate(fn) {
-    const operation = queue.catch(() => {}).then(async () => { await ensure(); const result = await fn(data); await save(); return result; });
+    const operation = queue.catch(() => {}).then(async () => {
+      const current = await ensure();
+      const candidate = structuredClone(current);
+      const result = await fn(candidate);
+      // Detach the committed state from objects retained by the caller.
+      const committed = structuredClone(candidate);
+      await save(committed);
+      data = committed;
+      return result;
+    });
     queue = operation.catch(() => {});
     return operation;
   }

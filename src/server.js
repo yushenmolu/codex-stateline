@@ -9,6 +9,7 @@ import { createTaskSummary } from './telemetry/task-summary.js';
 import { createUsageSummary, publicUsageSnapshot } from './telemetry/usage-summary.js';
 import { createLiveTelemetry, publicLiveSnapshot, unavailableLiveSnapshot } from './telemetry/live-telemetry.js';
 import { createDesktopLiveConnector } from './telemetry/desktop-live.js';
+import { createMagpieUsage } from './telemetry/magpie-usage.js';
 import { unavailableTelemetry } from './telemetry/usage.js';
 import { isAllowedModel, isAllowedEffort } from './benchmark/runner.js';
 
@@ -93,6 +94,10 @@ function validatePayload(path, value, availableModels = null, availableEfforts =
     if (!exactKeys(value, ['runId', 'caseId', 'rubricVersion', 'scores']) || !UUID.test(value.runId ?? '') || !((value.rubricVersion === 'pelican-v1' && ['instruction-following', 'logic-grid', 'code-trace'].includes(value.caseId)) || (value.rubricVersion === 'pelican-svg-v2' && value.caseId === 'pelican-svg') || (value.rubricVersion === 'pelican-svg-animated-v1' && value.caseId === 'pelican-svg-animated') || (value.rubricVersion === 'pelican-html-animated-v1' && value.caseId === 'pelican-html-animated') || (value.rubricVersion === 'pelican-cockpit-v1' && value.caseId === 'pelican-cockpit')) || !value.scores || typeof value.scores !== 'object' || Array.isArray(value.scores) || !exactKeys(value.scores, ['correctness', 'consistency', 'constraint_adherence']) || !Object.values(value.scores).every((x) => Number.isInteger(x) && x >= 1 && x <= 5)) fail(400, 'schema_invalid', 'Score request schema is invalid.');
   } else if (path === '/api/benchmark/baseline') {
     if (!exactKeys(value, ['runId']) || !UUID.test(value.runId ?? '')) fail(400, 'schema_invalid', 'Baseline request schema is invalid.');
+  } else if (path === '/api/live/refresh') {
+    if (!Object.keys(value).every((key) => key === 'taskId') || (Object.hasOwn(value, 'taskId') && !UUID.test(value.taskId ?? ''))) fail(400, 'schema_invalid', 'Live refresh request schema is invalid.');
+  } else if (path === '/api/usage/refresh') {
+    if (!exactKeys(value, [])) fail(400, 'schema_invalid', 'Usage refresh request schema is invalid.');
   } else if (path === '/api/shutdown') {
     if (!exactKeys(value, [])) fail(400, 'schema_invalid', 'Shutdown request schema is invalid.');
   } else if (path === '/api/benchmark/cancel') {
@@ -147,6 +152,8 @@ export function createCompanionServer({ telemetry, liveTelemetry, benchmark = nu
   let closePromise;
   let shutdownScheduled = false;
   let usageStarted = false;
+  let usageRefresh = null;
+  let liveRefresh = null;
   const server = httpServer(async (req, res) => {
     const isPreviewApi = req.url?.split('?', 1)[0] === PREVIEW_API;
     const previewJson = (status, data, extra = {}) => {
@@ -161,7 +168,7 @@ export function createCompanionServer({ telemetry, liveTelemetry, benchmark = nu
       const url = new URL(req.url, ORIGIN);
       if (url.search && req.method === 'POST' && !isPreviewApi) fail(400, 'query_not_allowed', 'Query strings are not allowed.');
       const path = url.pathname;
-      const methods = { '/': 'GET', '/app.js': 'GET', '/styles.css': 'GET', '/tokens.css': 'GET', '/api/capabilities': 'GET', '/api/nonce': 'GET', '/api/telemetry': 'GET', '/api/live': 'GET', '/api/tasks': 'GET', '/api/usage': 'GET', '/api/benchmark': 'GET', '/api/benchmark/run': 'POST', '/api/benchmark/score': 'POST', '/api/benchmark/baseline': 'POST', '/api/benchmark/cancel': 'POST', '/api/shutdown': 'POST' };
+      const methods = { '/': 'GET', '/app.js': 'GET', '/styles.css': 'GET', '/tokens.css': 'GET', '/api/capabilities': 'GET', '/api/nonce': 'GET', '/api/telemetry': 'GET', '/api/live': 'GET', '/api/live/refresh': 'POST', '/api/tasks': 'GET', '/api/usage': 'GET', '/api/usage/refresh': 'POST', '/api/benchmark': 'GET', '/api/benchmark/run': 'POST', '/api/benchmark/score': 'POST', '/api/benchmark/baseline': 'POST', '/api/benchmark/cancel': 'POST', '/api/shutdown': 'POST' };
       for (const route of [...Object.keys(PREVIEW_ASSETS), PREVIEW_API]) methods[route] = 'GET';
       if (!Object.hasOwn(methods, path)) fail(404, 'not_found', 'Route was not found.');
       if (methods[path] !== req.method) { res.setHeader('Allow', methods[path]); fail(405, 'method_not_allowed', 'Method is not allowed.'); }
@@ -197,6 +204,33 @@ export function createCompanionServer({ telemetry, liveTelemetry, benchmark = nu
       if (path === '/api/capabilities') { json(res, 200, { product: 'codex-companion', protocolVersion: 1, capabilities: ['configured-defaults', 'pelican-svg-v2', 'versioned-scoring', 'pelican-html-animated-v1', 'isolated-html-preview-v1', 'pelican-cockpit-v1', 'cockpit-preview-source-v1', 'live-telemetry-v1'], instanceId }); return; }
       if (path === '/api/nonce') { json(res, 200, { ok: true }, { 'X-Codex-Companion-Nonce': nonce }); return; }
       if (req.method === 'POST') checkNonce(req, nonce);
+      if (path === '/api/usage/refresh') {
+        validatePayload(path, await bodyJson(req));
+        if (!usageStarted) {
+          usage.ensureStarted?.();
+          usageStarted = true;
+        }
+        // Full discovery can exceed the client's HTTP deadline. Coalesce the
+        // scan in the background; the normal GET poll publishes its result.
+        usageRefresh ??= Promise.resolve().then(() => usage.runOnce?.({ discover: true })).catch(() => {}).finally(() => { usageRefresh = null; });
+        const published = publicUsageSnapshot(await usage.snapshot());
+        if (!published) fail(503, 'service_unavailable', 'Usage snapshot is invalid.');
+        json(res, 202, published);
+        return;
+      }
+      if (path === '/api/live/refresh') {
+        if (url.search) fail(400, 'query_not_allowed', 'Query strings are not allowed.');
+        const body = await bodyJson(req);
+        validatePayload(path, body);
+        const taskId = body.taskId ?? null;
+        live.ensureStarted?.();
+        // Polls refresh the desktop handshake and re-read Magpie once, not once
+        // per overlapping button click or automatic live request.
+        liveRefresh ??= Promise.resolve().then(() => live.refresh?.({ taskId })).finally(() => { liveRefresh = null; });
+        await liveRefresh;
+        json(res, 200, publicLiveSnapshot(live.snapshot({ taskId }), { taskId }));
+        return;
+      }
       if (path === '/api/live') {
         let taskId = null;
         if (req.url.endsWith('?')) fail(400, 'query_invalid', 'Live query is invalid.');
@@ -311,7 +345,7 @@ export function createCompanionServer({ telemetry, liveTelemetry, benchmark = nu
   return { server, nonce, close() {
     closePromise ??= (async () => {
       const stopped = new Promise((resolve, reject) => server.close((e) => e && e.code !== 'ERR_SERVER_NOT_RUNNING' ? reject(e) : resolve()));
-      await Promise.all([stopped, fallbackRefresh, defaultsRefresh, worker?.stop?.(), live?.stop?.(), benchmark?.close?.(), defaultsReader.stop?.(), usage?.stop?.()]);
+      await Promise.all([stopped.then(() => usageRefresh), stopped.then(() => liveRefresh), fallbackRefresh, defaultsRefresh, worker?.stop?.(), live?.stop?.(), benchmark?.close?.(), defaultsReader.stop?.(), usage?.stop?.()]);
     })();
     return closePromise;
   } };
@@ -320,7 +354,7 @@ export function createCompanionServer({ telemetry, liveTelemetry, benchmark = nu
 export async function startServer() {
   const sessionsDir = join(process.env.CODEX_HOME ?? join(process.env.USERPROFILE ?? '', '.codex'), 'sessions');
   const telemetry = createTelemetryWorker({ sessionsDir });
-  const liveTelemetry = createLiveTelemetry({ connector: createDesktopLiveConnector() });
+  const liveTelemetry = createLiveTelemetry({ connector: createDesktopLiveConnector(), usageSource: createMagpieUsage() });
   const defaults = createConfigDefaultsReader({ codexHome: process.env.CODEX_HOME ?? join(process.env.USERPROFILE ?? '', '.codex') });
   await defaults.refresh();
   await telemetry.start();

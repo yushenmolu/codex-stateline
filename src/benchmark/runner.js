@@ -385,11 +385,6 @@ export function createRunner({ executable = resolveExecutable(), spawnImpl = spa
           diagnostics.firstErrorElapsedMs ??= elapsed;
           diagnostics.lastErrorElapsedMs = elapsed;
           diagnostics.lastErrorClass = errorClassFor(event);
-          // 零输出加上两次以上报错，是「上游已经死了」的确定特征：中转挂死的运行到预算
-          // 耗尽都不会产出任何 item.*，而真正在推进的运行在首次报错前就已经有输出了。
-          // 判据取「有没有产出过输出」而不是「静默了多久」——静默时长的可行阈值窗口只有
-          // 288–332s（余量 4%），会误杀合法的长思考；同理只报一次错就掐同样有误杀风险。
-          if (!outputStarted && diagnostics.errorEventCount >= 2) void stop('upstream_stalled');
         }
         publish(failed ? 'stopping' : outputStarted ? 'generating' : 'waiting', event.type);
       };

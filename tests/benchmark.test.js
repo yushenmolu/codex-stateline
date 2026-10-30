@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, stat, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rmdir, stat, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRunner, resolveExecutable, APPROVED_MODELS, resolveBenchmarkModel, isAllowedModel, isAllowedEffort, EFFORTS, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS, TIMEOUT_ENV_KEY, resolveTimeoutMs, pickDiagnostics, DIAGNOSTIC_KEYS, MAX_ANSWER, MAX_STREAM } from '../src/benchmark/runner.js';
@@ -1630,40 +1630,62 @@ test('Cockpit startup stall is bounded but a started turn may keep thinking', as
   }
 });
 
-test('zero-output stall stops as upstream_stalled when no item ever arrives', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'runner-stalled-'));
+test('zero-output run can recover after multiple CLI reconnect notices', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'runner-reconnect-recovery-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  // 报告 5.1 的 #3：两次中转挂死是「零输出」形态，CLI 把它报成可恢复的
-  // Reconnecting 提示，所以没有任何既有分支会停掉进程，只能靠 errorEventCount
-  // 累积到 2 且 outputStarted 仍为 false 才敢判定上游已死。
   const line = value => JSON.stringify(value) + String.fromCharCode(10);
+  let kills = 0;
   const runner = createRunner({ tempRoot: root, spawnImpl: () => {
     const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: { end() { queueMicrotask(() => {
       child.stdout.emit('data', line({ type: 'thread.started', thread_id: 'thread' }));
       child.stdout.emit('data', line({ type: 'error', message: 'Reconnecting... 1/5 (stream disconnected before completion: origin did not respond)' }));
       child.stdout.emit('data', line({ type: 'error', message: 'Reconnecting... 2/5 (stream disconnected before completion: origin did not respond)' }));
-      // 刻意不发 close：挂死的真实形态就是进程一直活着，却再也不吐任何 item.*。
-    }); } }, kill() { this.emit('close', null, 'SIGKILL'); } });
+      child.stdout.emit('data', line({ type: 'item.completed', item: { type: 'agent_message', text: '<svg><!-- recovered after retry 2 --></svg>' } }));
+      child.stdout.emit('data', line({ type: 'turn.completed' }));
+      child.emit('close', 0);
+    }); } }, kill() { kills++; this.emit('close', null, 'SIGKILL'); } });
     return child;
   } });
-  await assert.rejects(runner.runCase({ caseDef: CASES[0] }), error => {
-    assert.equal(error.code, 'upstream_stalled');
-    assert.equal(error.message, 'upstream_stalled');
-    assert.equal(error.diagnostics.errorEventCount, 2);
-    assert.equal(error.diagnostics.lastErrorClass, 'reconnect_notice');
-    assert.equal(error.diagnostics.lastPhase, 'stopping');
-    // 上游挂死不是本机的进程问题，归因沿用既有的工艺错误分类，不外扩诊断枚举。
-    assert.equal(error.diagnostics.terminationReason, 'process_error');
-    return true;
-  });
+  const result = await runner.runCase({ caseDef: CASES[0] });
+  assert.equal(kills, 0, 'a retry notice alone must not terminate a still-recoverable run');
+  assert.equal(result.answer, '<svg><!-- recovered after retry 2 --></svg>');
+  assert.equal(result.diagnostics.errorEventCount, 2);
+  assert.equal(result.diagnostics.lastErrorClass, 'reconnect_notice');
+  assert.equal(result.diagnostics.terminationReason, 'completed');
+});
+
+test('failed reservation persistence does not publish a ghost request and same-id retry executes', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'benchmark-reservation-atomic-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const filePath = join(dir, 'benchmark.json');
+  const store = createStore({ filePath });
+  let calls = 0;
+  const service = await createBenchmarkService({ store, runner: { async runCase() { calls++; return { answer: '<svg/>' }; } } });
+  await mkdir(filePath);
+  const request = { requestId: 'atomic_reservation_request_123' };
+  await assert.rejects(service.run(request));
+  assert.deepEqual((await store.snapshot()).runs, [], 'failed rename must leave no in-memory queued run');
+  assert.deepEqual((await store.snapshot()).reservations, {}, 'failed rename must leave no in-memory idempotency reservation');
+  await rmdir(filePath);
+
+  await service.run(request);
+  for (let attempt = 0; attempt < 40; attempt++) {
+    if ((await service.snapshot()).latestRun?.status === 'completed') break;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  await service.close();
+  assert.equal(calls, 1, 'retry with the same request id should start one run');
+  const state = await store.snapshot();
+  assert.equal(state.runs.length, 1);
+  assert.equal(state.runs[0].status, 'completed');
+  assert.equal(state.reservations[request.requestId].status, 'completed');
 });
 
 test('a run that already produced output survives a burst of recoverable errors', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'runner-stall-guard-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  // 回归保护：报告 5.1 的 #4 在首次报错前就已经有输出，事后还有 287.7s 静默仍然成功。
-  // 看门狗唯一认的证据是「从没出过字」，一旦产过 reasoning/agent_message 就永久失活，
-  // 否则一次先报错、后恢复的运行会被误杀。
+  // Output progress may be delayed; recoverable CLI notices are not terminal even
+  // after earlier output, and the absolute runner deadline remains in force.
   const line = value => JSON.stringify(value) + String.fromCharCode(10);
   const runner = createRunner({ tempRoot: root, spawnImpl: () => {
     const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: { end() { queueMicrotask(() => {

@@ -40,9 +40,9 @@ Assert ($r.Image.Drawing.Children[1].Children[0].Children[0].Children[0].Childre
 foreach($bad in @('<!DOCTYPE svg [<!ENTITY a SYSTEM "file:///C:/Windows/win.ini">]><svg xmlns="http://www.w3.org/2000/svg">&a;</svg>','<?evil test?><svg xmlns="http://www.w3.org/2000/svg"/>','<svg xmlns="http://www.w3.org/2000/svg"><image href="https://invalid/"/></svg>','<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1" style="fill:red"/></svg>','<svg xmlns="http://www.w3.org/2000/svg"><path d="M NaN 0"/></svg>','<svg xmlns="http://www.w3.org/2000/svg"><g transform="scale(1000000)"><g transform="scale(1000000)"><rect width="2" height="2"/></g></g></svg>',('<svg xmlns="http://www.w3.org/2000/svg">'+('<g>'*33)+('</g>'*33)+'</svg>'),('<svg xmlns="http://www.w3.org/2000/svg">'+('<rect width="1" height="1"/>'*4097)+'</svg>'),('<svg xmlns="http://www.w3.org/2000/svg"><path d="'+('M0 0 '*7000)+'"/></svg>'))) { Assert ($null -eq [CodexNative.SafeSvg]::Parse($bad).Image) 'unsafe SVG accepted' }
 Add-Type -ReferencedAssemblies @('System.dll','System.Core.dll','System.Net.Http.dll') -TypeDefinition @'
 using System;using System.IO;using System.Net;using System.Net.Http;using System.Threading;using System.Threading.Tasks;
-public class NativeFixtureHandler:HttpMessageHandler {public volatile bool Waiting;public TaskCompletionSource<bool> Release=new TaskCompletionSource<bool>();public string InstanceId="12345678-1234-1234-1234-123456789abc";public string Payload;public string ErrorCode;public int Status=400;public int Mode,Posts,NonceCalls,Requests;public bool DisposedStream,Origin;public string Route,RouteCode;public int RouteStatus;public volatile bool RouteWaiting;public volatile int RouteHits;public TaskCompletionSource<bool> RouteRelease=new TaskCompletionSource<bool>();public volatile bool UsageWaiting;public int UsageHits;public string UsagePayload,UsageStalePayload;public TaskCompletionSource<bool> UsageHeldRelease=new TaskCompletionSource<bool>();public TaskCompletionSource<bool> UsageFinalRelease=new TaskCompletionSource<bool>();
-  public bool Live,HoldLive,FailLive;public string LastLiveQuery,LivePayload;public int LiveHits;public TaskCompletionSource<bool> LiveRelease=new TaskCompletionSource<bool>();
-  protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage req,CancellationToken token){Interlocked.Increment(ref Requests);Origin=req.Headers.Contains("Origin");string path=req.RequestUri.AbsolutePath;if(req.Method==HttpMethod.Post)Posts++;if(Mode==1)await Task.Delay(500,token);if(path=="/api/capabilities")return Response((@"{'product':'codex-companion','protocolVersion':1,'capabilities':['configured-defaults','pelican-svg-v2','versioned-scoring'"+(Live?",'live-telemetry-v1'":"")+@"],'instanceId':'12345678-1234-1234-1234-123456789abc'}").Replace((char)39,(char)34).Replace("12345678-1234-1234-1234-123456789abc",InstanceId));if(path=="/api/nonce"){NonceCalls++;var r=Response("{}");r.Headers.Add("X-Codex-Companion-Nonce","fixture");return r;}if(Mode==4&&req.Method==HttpMethod.Post&&Posts==1){var r=Response(@"{'error':{'code':'nonce_invalid'}}".Replace((char)39,(char)34));r.StatusCode=HttpStatusCode.Forbidden;return r;}if((Mode==7||Mode==8)&&path=="/api/benchmark"){Waiting=true;await Release.Task;if(Mode==8)throw new HttpRequestException("private-secret");return Response("{}");}if(Mode==6){var error=Response("{"+(char)34+"error"+(char)34+": {"+(char)34+"code"+(char)34+":"+(char)34+ErrorCode+(char)34+","+(char)34+"message"+(char)34+":"+(char)34+"private-secret diagnostics"+(char)34+"}}");error.StatusCode=(HttpStatusCode)Status;return error;}if(Mode==2||Mode==3){var r=new HttpResponseMessage(HttpStatusCode.OK);r.Content=new StreamContent(new Slow(this,Mode==3));return r;}if(Mode==5){var r=Response("{}");r.Content.Headers.ContentLength=16777217;return r;}if(Route=="hold"&&path=="/api/telemetry"){RouteHits++;RouteWaiting=true;if(!RouteRelease.Task.Wait(8000))throw new TimeoutException("held telemetry was never released");return Response("{}");}if(Route=="status"){var scripted=Response("{"+(char)34+"error"+(char)34+":{"+(char)34+"code"+(char)34+":"+(char)34+RouteCode+(char)34+"}}");scripted.StatusCode=(HttpStatusCode)RouteStatus;return scripted;}if(path=="/api/live"){Interlocked.Increment(ref LiveHits);LastLiveQuery=req.RequestUri.Query;if(HoldLive)await LiveRelease.Task;if(FailLive)throw new HttpRequestException("fixture live disconnected");return Response(LivePayload??Payload??"{}");}if(path=="/api/usage"){int hit=Interlocked.Increment(ref UsageHits);UsageWaiting=true;if(hit==1)return UsageResponse(UsagePayload??Payload??"{}");if(hit==2){var held=new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);UsageHeldRelease=held;return UsageResponse(UsageStalePayload??UsagePayload??"{}",held.Task);}if(hit==3){var final=new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);UsageFinalRelease=final;return UsageResponse(UsagePayload??Payload??"{}",final.Task);}return UsageResponse(UsagePayload??Payload??"{}");}return Response(Payload??"{}");}
+public class NativeFixtureHandler:HttpMessageHandler {public volatile bool Waiting;public TaskCompletionSource<bool> Release=new TaskCompletionSource<bool>();public string InstanceId="12345678-1234-1234-1234-123456789abc";public string Payload;public string ErrorCode;public int Status=400;public int Mode,Posts,NonceCalls,Requests;public bool DisposedStream,Origin;public string Route,RouteCode;public int RouteStatus;public volatile bool RouteWaiting;public volatile int RouteHits;public TaskCompletionSource<bool> RouteRelease=new TaskCompletionSource<bool>();public volatile bool UsageWaiting;public int UsageHits,UsageRefreshHits;public string UsagePayload,UsageStalePayload,UsageRefreshPayload;public TaskCompletionSource<bool> UsageHeldRelease=new TaskCompletionSource<bool>();public TaskCompletionSource<bool> UsageFinalRelease=new TaskCompletionSource<bool>();
+  public bool Live,HoldLive,FailLive,HoldUsageRefresh,HoldLiveRefresh;public TaskCompletionSource<bool> RefreshRelease=new TaskCompletionSource<bool>();public string LastLiveQuery,LivePayload,LastLiveRefreshBody,LiveRefreshPayload,LiveRefreshError;public int LiveHits,LiveRefreshHits;public TaskCompletionSource<bool> LiveRelease=new TaskCompletionSource<bool>();
+  protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage req,CancellationToken token){Interlocked.Increment(ref Requests);Origin=req.Headers.Contains("Origin");string path=req.RequestUri.AbsolutePath;if(req.Method==HttpMethod.Post)Interlocked.Increment(ref Posts);if(Mode==1)await Task.Delay(500,token);if(path=="/api/capabilities")return Response((@"{'product':'codex-companion','protocolVersion':1,'capabilities':['configured-defaults','pelican-svg-v2','versioned-scoring'"+(Live?",'live-telemetry-v1'":"")+@"],'instanceId':'12345678-1234-1234-1234-123456789abc'}").Replace((char)39,(char)34).Replace("12345678-1234-1234-1234-123456789abc",InstanceId));if(path=="/api/nonce"){NonceCalls++;var r=Response("{}");r.Headers.Add("X-Codex-Companion-Nonce","fixture");return r;}if(Mode==4&&req.Method==HttpMethod.Post&&Posts==1){var r=Response(@"{'error':{'code':'nonce_invalid'}}".Replace((char)39,(char)34));r.StatusCode=HttpStatusCode.Forbidden;return r;}if((Mode==7||Mode==8)&&path=="/api/benchmark"){Waiting=true;await Release.Task;if(Mode==8)throw new HttpRequestException("private-secret");return Response("{}");}if(Mode==6){var error=Response("{"+(char)34+"error"+(char)34+": {"+(char)34+"code"+(char)34+":"+(char)34+ErrorCode+(char)34+","+(char)34+"message"+(char)34+":"+(char)34+"private-secret diagnostics"+(char)34+"}}");error.StatusCode=(HttpStatusCode)Status;return error;}if(Mode==2||Mode==3){var r=new HttpResponseMessage(HttpStatusCode.OK);r.Content=new StreamContent(new Slow(this,Mode==3));return r;}if(Mode==5){var r=Response("{}");r.Content.Headers.ContentLength=16777217;return r;}if(Route=="hold"&&path=="/api/telemetry"){RouteHits++;RouteWaiting=true;if(!RouteRelease.Task.Wait(8000))throw new TimeoutException("held telemetry was never released");return Response("{}");}if(Route=="status"){var scripted=Response("{"+(char)34+"error"+(char)34+":{"+(char)34+"code"+(char)34+":"+(char)34+RouteCode+(char)34+"}}");scripted.StatusCode=(HttpStatusCode)RouteStatus;return scripted;}if(path=="/api/live"){Interlocked.Increment(ref LiveHits);LastLiveQuery=req.RequestUri.Query;if(HoldLive)await LiveRelease.Task;if(FailLive)throw new HttpRequestException("fixture live disconnected");return Response(LivePayload??Payload??"{}");}if(path=="/api/live/refresh"){Interlocked.Increment(ref LiveRefreshHits);if(HoldLiveRefresh)await RefreshRelease.Task;LastLiveRefreshBody=await req.Content.ReadAsStringAsync();if(LiveRefreshError!=null)throw new HttpRequestException(LiveRefreshError);return Response(LiveRefreshPayload);}if(path=="/api/usage/refresh"){Interlocked.Increment(ref UsageRefreshHits);if(HoldUsageRefresh)await RefreshRelease.Task;return Response(UsageRefreshPayload??"{}");}if(path=="/api/usage"){int hit=Interlocked.Increment(ref UsageHits);UsageWaiting=true;if(hit==1)return UsageResponse(UsagePayload??Payload??"{}");if(hit==2){var held=new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);UsageHeldRelease=held;return UsageResponse(UsageStalePayload??UsagePayload??"{}",held.Task);}if(hit==3){var final=new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);UsageFinalRelease=final;return UsageResponse(UsagePayload??Payload??"{}",final.Task);}return UsageResponse(UsagePayload??Payload??"{}");}return Response(Payload??"{}");}
   static HttpResponseMessage UsageResponse(string text,Task gate=null){if(gate==null)return Response(text);return new HttpResponseMessage(HttpStatusCode.OK){Content=new StreamContent(new GatedStream(gate,text))};}
 
   public sealed class GatedStream:Stream {readonly Task gate;readonly byte[] bytes;int offset;public GatedStream(Task g,string text){gate=g;bytes=System.Text.Encoding.UTF8.GetBytes(text);}public override async Task<int> ReadAsync(byte[] buffer,int offset,int count,CancellationToken token){await gate.ConfigureAwait(false);return Read(buffer,offset,count);}public override int Read(byte[] buffer,int offset,int count){int n=Math.Min(count,bytes.Length-this.offset);if(n<=0)return 0;Array.Copy(bytes,this.offset,buffer,offset,n);this.offset+=n;return n;}public override bool CanRead{get{return true;}}public override bool CanSeek{get{return false;}}public override bool CanWrite{get{return false;}}public override long Length{get{return bytes.Length;}}public override long Position{get{return offset;}set{throw new NotSupportedException();}}public override void Flush(){}public override long Seek(long o,SeekOrigin s){throw new NotSupportedException();}public override void SetLength(long v){throw new NotSupportedException();}public override void Write(byte[] b,int o,int c){throw new NotSupportedException();}}
@@ -137,6 +137,56 @@ foreach($code in 'private-secret','authentication_failed private-secret','AUTHEN
     $task=$client.RequestAsync('/api/telemetry',$null,262144,1000);PumpUntil {$task.IsCompleted}
     Assert ($task.IsFaulted -and $task.Exception.InnerException.Code -eq 'request_failed') 'HTTP exact whitelist bypassed'
 }
+$client.Dispose()
+# A response failure after a POST can hide an accepted run; preserve its request identity.
+foreach($failedKind in 'run','cancel','score') {
+    $handler=New-Object NativeFixtureHandler;$handler.Mode=6;$handler.Status=503;$handler.ErrorCode='service_unavailable'
+    $client=New-Object CodexNative.WidgetClient $false,$handler;$clients.Add($client)
+    $path=if($failedKind -eq 'run'){'/api/benchmark/run'}elseif($failedKind -eq 'cancel'){'/api/benchmark/cancel'}else{'/api/benchmark/score'}
+    Assert ($client.Start($failedKind,$path,@{requestId='uncertain-transport'})) 'uncertain transport fixture was not accepted'
+    $script:uncertainEvent=$null
+    PumpUntil { $e=$null;if($client.Dequeue([ref]$e)){$script:uncertainEvent=$e;$true}else{$false} }
+    $expected=if($failedKind -eq 'run'){'submission_unknown'}else{'mutation_unknown'}
+    Assert ($script:uncertainEvent.Error -ceq $expected -and $handler.Posts -eq 1) 'ambiguous POST result was treated as a rejected request'
+    if($failedKind -in 'run','cancel'){Assert ($script:uncertainEvent.RequestId -ceq 'uncertain-transport') 'ambiguous POST event lost its submitted request identity'}
+    $client.Dispose()
+}
+# Successful replies also retain the submitted identity, independently of the response body.
+foreach($acceptedKind in 'run','cancel') {
+    $handler=New-Object NativeFixtureHandler;$handler.Payload='{}'
+    $client=New-Object CodexNative.WidgetClient $false,$handler;$clients.Add($client)
+    Assert ($client.Start($acceptedKind,('/api/benchmark/'+$acceptedKind),@{requestId='accepted-transport'})) 'successful transport fixture was not accepted'
+    $script:acceptedEvent=$null
+    PumpUntil { $e=$null;if($client.Dequeue([ref]$e)){$script:acceptedEvent=$e;$true}else{$false} }
+    Assert ($null -eq $script:acceptedEvent.Error -and $script:acceptedEvent.RequestId -ceq 'accepted-transport') 'successful POST event lost its submitted request identity'
+    $client.Dispose()
+}
+# Usage refreshes have their own POST slot and never block benchmark mutations.
+$handler=New-Object NativeFixtureHandler;$handler.Payload='{}';$handler.UsageRefreshPayload='{}';$handler.HoldUsageRefresh=$true
+$client=New-Object CodexNative.WidgetClient $false,$handler; $clients.Add($client)
+Assert ($client.Start('usage-refresh','/api/usage/refresh',@{})) 'usage refresh start rejected'
+PumpUntil {$handler.UsageRefreshHits -eq 1}
+Assert (-not $client.Start('usage-refresh','/api/usage/refresh',@{})) 'duplicate usage refresh accepted'
+Assert ($client.Start('mutation','/api/benchmark/run',@{requestId='parallel-refresh';model='configured';reasoningEffort='configured'})) 'usage refresh blocked benchmark mutation'
+PumpUntil {$handler.Posts -eq 2 -and -not (ClientInFlight $client 'mutation')}
+Assert (ClientInFlight $client 'usage-refresh') 'held usage refresh released its slot before the response'
+$handler.RefreshRelease.SetResult($true)
+PumpUntil {-not (ClientInFlight $client 'usage-refresh')}
+Assert ($handler.UsageRefreshHits -eq 1) 'parallel usage refresh was not posted'
+$client.Dispose()
+# Current-conversation refreshes also have a dedicated slot, independent of GET live and benchmark POST.
+$handler=New-Object NativeFixtureHandler;$handler.Payload='{}';$handler.LivePayload='{}';$handler.LiveRefreshPayload='{}';$handler.HoldLiveRefresh=$true
+$client=New-Object CodexNative.WidgetClient $false,$handler;$clients.Add($client)
+Assert ($client.Start('live-refresh','/api/live/refresh',@{})) 'live refresh start rejected'
+PumpUntil {$handler.LiveRefreshHits -eq 1}
+Assert (-not $client.Start('live-refresh','/api/live/refresh',@{})) 'duplicate live refresh accepted'
+Assert ($client.Start('live','/api/live',$null)) 'live refresh blocked live GET'
+Assert ($client.Start('mutation','/api/benchmark/run',@{requestId='parallel-live-refresh';model='configured';reasoningEffort='configured'})) 'live refresh blocked benchmark mutation'
+PumpUntil {$handler.Posts -eq 2 -and $handler.LiveHits -eq 1 -and -not (ClientInFlight $client 'mutation') -and -not (ClientInFlight $client 'live')}
+Assert (ClientInFlight $client 'live-refresh') 'held live refresh released its slot before the response'
+$handler.RefreshRelease.SetResult($true)
+PumpUntil {-not (ClientInFlight $client 'live-refresh')}
+Assert ($handler.LiveRefreshHits -eq 1) 'parallel live refresh was not posted'
 $client.Dispose()
 # Stale queued successes AND failures are discarded on a new service generation.
 $handler=New-Object NativeFixtureHandler;$client=New-Object CodexNative.WidgetClient $false,$handler; $clients.Add($client)
@@ -426,7 +476,7 @@ $window.FixtureState(([CodexNative.WidgetClient]::Serialize(@{state='ok';session
 foreach($invalidUsage in @(@{inputTokens=-1;outputTokens=0;totalTokens=$null},@{inputTokens=[double]::MaxValue;outputTokens=0;totalTokens=$null},@{inputTokens=5;outputTokens=$null;totalTokens='many'},@{inputTokens=1;outputTokens=1;totalTokens=3})) {
     $window.FixtureState(([CodexNative.WidgetClient]::Serialize(@{state='ok';session=$usageSession;sampledAt=$usageSession.updatedAt;usage=$invalidUsage})))
     Assert ($window.MetricControls[0].Text -ceq '1G' -and $window.MetricControls[1].Text -ceq '1G' -and $window.MetricControls[2].Text -ceq '2G' -and $window.SelectedUsageStateControl.Text -match '上次有效数据') 'invalid/partial legacy usage replaced a complete same-task triple'
-    Assert ([string]$window.MetricControls[2].ToolTip -ceq '合计 · 2000000000 tokens' -and [Windows.Automation.AutomationProperties]::GetHelpText($window.MetricControls[2]) -match '2000000000') 'retained legacy triple lost exact tooltip or accessibility'
+    Assert ([string]$window.MetricControls[2].ToolTip -ceq '合计 · 2000000000 词元' -and [Windows.Automation.AutomationProperties]::GetHelpText($window.MetricControls[2]) -match '2000000000') 'retained legacy triple lost exact tooltip or accessibility'
 }
 # A fresh legacy response may expose individually valid fields, without creating a complete triple.
 ResetTelemetryFixture $window
@@ -549,7 +599,7 @@ function SpeedFixture([string]$state='ok',[object]$session=$usageSession) { $win
 ResetTelemetryFixture $window
 SpeedFixture
 Assert ($window.MetricControls[3].Text -ceq (11.9).ToString('N1')) 'valid 11.9 changed formatting'
-Assert ((UiText $window) -match '上轮均速 token/s') 'speed header missing visible unit'
+Assert ((UiText $window) -match '上轮均速') 'speed header missing visible unit'
 function RetainedSpeed([string]$label,[string]$tip,[string]$help) {
     Assert ($window.MetricControls[3].Text -ceq (11.9).ToString('N1') -and $window.SelectedUsageStateControl.Text -match '上次有效数据') ('transient/invalid sample erased validated same-task speed: '+$label)
     Assert ([string]$window.MetricControls[3].ToolTip -ceq $tip -and [Windows.Automation.AutomationProperties]::GetHelpText($window.MetricControls[3]) -ceq $help) ('retained speed lost its original tooltip/accessibility: '+$label)
@@ -811,8 +861,8 @@ $cockpitImage=WindowField 'cockpitImage'
 $window.ResultsWindow.UpdateLayout()
 PumpUntil {$cockpitImage.Width -gt 1 -and [Math]::Abs($cockpitImage.Height-$cockpitImage.Width*600/960) -lt 1}
 Assert ($null -ne $cockpitImage -and $cockpitImage.Width -gt 0 -and [Math]::Abs($cockpitImage.Height-$cockpitImage.Width*600/960) -lt 1 -and $cockpitImage.Width -le $casePanel.ActualWidth+1 -and $cockpitImage.Stretch -eq [Windows.Media.Stretch]::Uniform -and [Windows.Automation.AutomationProperties]::GetAutomationId($cockpitImage) -ceq 'CockpitPreviewImage') 'Cockpit Image did not contain within the available width or lost identity'
-Assert ((UiText $window.ResultsWindow) -match '点击画面中的播放/暂停按钮操作作品') 'inline artwork interaction explanation missing'
-Assert ((UiText $window.ResultsWindow) -match '系统减少动态效果可能使作品默认暂停' -and (UiText $window.ResultsWindow) -match '最高约 30 帧/秒') 'inline sampling/reduced-motion explanation missing'
+Assert ((UiText $window.ResultsWindow) -match '作品如包含交互控件，可在画面中点击操作') 'conditional artwork interaction explanation missing'
+Assert ((UiText $window.ResultsWindow) -match '预览按动效优先模式运行，不更改系统设置' -and (UiText $window.ResultsWindow) -match '最高约 30 帧/秒' -and (UiText $window.ResultsWindow) -notmatch '系统减少动态效果可能使作品默认暂停') 'inline motion override guidance missing'
 $workArea=[Windows.SystemParameters]::WorkArea;$resultsBounds=$window.ResultsWindow
 Assert ($resultsBounds.Width -le $workArea.Width -and $resultsBounds.Height -le $workArea.Height -and $resultsBounds.MinWidth -le $workArea.Width -and $resultsBounds.MinHeight -le $workArea.Height -and $resultsBounds.Left -ge $workArea.Left -and $resultsBounds.Top -ge $workArea.Top -and $resultsBounds.Left+$resultsBounds.Width -le $workArea.Right -and $resultsBounds.Top+$resultsBounds.Height -le $workArea.Bottom) 'default Results bounds exceed WorkArea'
 $caseScroll=@(Visuals $window.ResultsWindow|Where-Object {$_ -is [Windows.Controls.ScrollViewer] -and [object]::ReferenceEquals($_.Content,$casePanel)})[0]
@@ -948,7 +998,7 @@ try {
             Assert ($cockpitImage.ActualHeight -ge 150 -and $imagePoint.X -ge -1 -and $imagePoint.Y -ge -1 -and $imagePoint.X+$cockpitImage.ActualWidth -le $caseScroll.ViewportWidth+1 -and $imagePoint.Y+$cockpitImage.ActualHeight -le $caseScroll.ViewportHeight+1 -and $caseScroll.ScrollableHeight -le 1) ('compact artwork is too small or incomplete: '+$cockpitImage.ActualWidth+'x'+$cockpitImage.ActualHeight)
             Assert ($openControl.IsVisible -and $openControl.IsEnabled -and $actionPoint.Y -ge -1 -and $actionPoint.Y+$openControl.ActualHeight -le $caseScroll.ViewportHeight+1) 'compact artwork action is not reachable without scrolling'
             Assert ($openControl.ToolTip -match '运行诊断' -and $openControl.ToolTip -match '清理已确认') 'compact Cockpit diagnostics remained on a collapsed case heading'
-            Assert ((WindowField 'cockpitExplanation').IsVisible -and (WindowField 'cockpitExplanation').Text -ceq '点击画面中的播放/暂停按钮操作作品。' -and (WindowField 'cockpitExplanation').ToolTip -match '最高约 30 帧/秒' -and (WindowField 'cockpitExplanation').ToolTip -match '系统减少动态效果可能使作品默认暂停' -and $openControl.ToolTip -match '弹窗内预览 · 支持作品交互') 'compact operation guidance or detailed tooltip missing'
+            Assert ((WindowField 'cockpitExplanation').IsVisible -and (WindowField 'cockpitExplanation').Text -ceq '作品如包含交互控件，可在画面中点击操作。' -and (WindowField 'cockpitExplanation').ToolTip -match '最高约 30 帧/秒' -and (WindowField 'cockpitExplanation').ToolTip -match '预览按动效优先模式运行，不更改系统设置' -and $openControl.ToolTip -match '弹窗内预览 · 支持作品交互') 'compact operation guidance or motion override tooltip missing'
             $null=InvokeWindow 'SetCockpitMessage' @('作品操作未发送，请稍后重试。');$window.ResultsWindow.UpdateLayout()
             Assert ((WindowField 'cockpitMessage').IsVisible -and (WindowField 'cockpitMessage').Text -match '作品操作未发送') 'compact density hid an artwork input error'
             $benchControl=WindowField 'bench';$savedBench=$benchControl.Text;$benchControl.Text=[CodexNative.WidgetClient]::ErrorDescription('disconnected');$null=InvokeWindow 'UpdateControls'
@@ -1188,6 +1238,20 @@ $window.FixtureEvent('score','score_invalid',$null)
 Assert ($draftMap.ContainsKey($draftKey) -and $null -eq $window.PendingDraft) 'failed score lost draft'
 $null=$startScore.Invoke($window,@(@{rubricVersion='pelican-svg-animated-v1'},$draftKey));$window.FixtureEvent('score',$null,'{}')
 Assert (-not $draftMap.ContainsKey($draftKey) -and $null -eq $window.PendingDraft) 'own score ack not cleared'
+# A service restart releases an old score acknowledgement without discarding its editable draft.
+$draftMap[$draftKey]=[int[]]@(1,2,3)
+$null=$startScore.Invoke($window,@(@{rubricVersion='pelican-svg-animated-v1'},$draftKey))
+$scoreClient=$window.GetType().GetField('client',$flags).GetValue($window)
+$oldServiceGeneration=$scoreClient.ServiceGeneration
+$scoreClient.GetType().GetField('generation',$flags).SetValue($scoreClient,$oldServiceGeneration+1)
+$window.FixtureEventAtGeneration('score','score_invalid',$null,$oldServiceGeneration)
+Assert ($null -eq $window.PendingDraft -and $draftMap.ContainsKey($draftKey)) 'service restart left score pending or discarded its draft'
+$window.FixtureAcceptScore=$true
+Assert ($startScore.Invoke($window,@(@{rubricVersion='pelican-svg-animated-v1'},$draftKey)) -and $window.PendingDraft -eq $draftKey) 'score could not be retried after service restart'
+$window.FixtureEventAtGeneration('score',$null,'{}',$oldServiceGeneration)
+Assert ($window.PendingDraft -eq $draftKey -and $draftMap.ContainsKey($draftKey)) 'stale successful acknowledgement removed a current score draft'
+$window.FixtureEvent('score',$null,'{}')
+Assert (-not $draftMap.ContainsKey($draftKey)) 'current-generation score acknowledgement did not clear the retried draft'
 # Actual result buttons: fixture has no HTTP or browser.
 $window.ModeControl.SelectedValue='cockpit';$window.FixtureAcceptRun=$true;$window.FixtureAcceptCancel=$true
 $window.FixtureEvent('history',$null,(@{available=$true;runs=@()}|ConvertTo-Json -Compress))
@@ -1199,6 +1263,8 @@ Click $start
 $id=$window.GetType().GetField('requestId',$flags).GetValue($window)
 Assert ($window.IsBusy -and -not $start.IsEnabled -and $cancel.IsEnabled -and -not $window.ModelControl.IsEnabled) 'submitting buttons'
 Click $start;Assert ($window.GetType().GetField('requestId',$flags).GetValue($window) -eq $id) 'double start changed identity'
+HistoryFixture $null $null @()
+Assert ($window.IsBusy -and -not $start.IsEnabled) 'history sampled before submission acknowledgement released the run lock'
 $pending=$window.GetType().GetField('awaitingHtmlRun',$flags)
 $runPreviewSchedules=[long](WindowField 'fixturePreviewScheduleCount')
 $fixtureRun=@{runId='11111111-1111-4111-8111-111111111111';requestId=$id;status='queued';caseSetVersion='pelican-cockpit-v1';rubricVersion='pelican-cockpit-v1';caseResults=@(@{caseId='pelican-cockpit';status='queued';answer=''})}
@@ -1222,6 +1288,36 @@ Assert ($retry.IsEnabled -and $start.IsEnabled -and -not $cancel.IsEnabled) 'can
 $beforeRetry=$fixtureRun.requestId;Click $retry
 Assert ($window.IsBusy -and $window.GetType().GetField('requestId',$flags).GetValue($window) -ne $beforeRetry) 'retry reused identity'
 $window.FixtureUnknown('uncertain');Assert (-not $start.IsEnabled -and -not $retry.IsEnabled) 'unknown permits generation'
+HistoryFixture $null $null @()
+Assert ($window.SubmissionUnknown -and $window.BenchState -match '未知' -and $retry.IsEnabled -and $retry.Content -ceq '核实同一请求') 'empty history failed to offer same-request recovery'
+$unknownPayload=$window.SubmittedRequest
+$window.FixtureAcceptRun=$true
+$window.FixtureRetryUnknown()
+Assert ($window.FixtureRecoveryRunCount -eq 1 -and $window.SubmissionUnknown -and [string]$window.SubmittedRequest.requestId -ceq 'uncertain') 'first recovery did not reuse the exact request identity'
+$window.FixtureEvent('run','submission_unknown',$null)
+HistoryFixture $null $null @()
+$window.FixtureRetryUnknown();$window.FixtureEvent('run','submission_unknown',$null);HistoryFixture $null $null @()
+$window.FixtureRetryUnknown();$window.FixtureEvent('run','submission_unknown',$null);HistoryFixture $null $null @()
+Assert ($window.FixtureRecoveryRunCount -eq 3 -and $window.SubmissionUnknown -and [string]$window.SubmittedRequest.requestId -ceq 'uncertain') 'bounded retry changed request identity or lost the unresolved submission'
+$window.GetType().GetField('submissionRetryAt',$flags).SetValue($window,[DateTime]::MinValue)
+$window.GetType().GetMethod('DrainClientEvents',$flags).Invoke($window,@())|Out-Null
+Assert ($window.FixtureRecoveryRunCount -eq 3 -and $window.SubmissionUnknown -and [object]::ReferenceEquals($unknownPayload,$window.SubmittedRequest)) 'automatic recovery exceeded its retry limit or replaced the immutable payload'
+$window.FixtureRun()
+Assert ($window.FixtureRecoveryRunCount -eq 4 -and [object]::ReferenceEquals($unknownPayload,$window.SubmittedRequest)) 'manual recovery created a new request after automatic retries were exhausted'
+$window.FixtureEvent('run','submission_unknown',$null)
+HistoryFixture $null $null @()
+$window.FixtureAcceptCancel=$true
+$window.FixtureCancel()
+Assert ($window.IsBusy -and -not $start.IsEnabled) 'cancel intent released the unresolved request lock'
+$window.FixtureEvent('cancel',$null,'{}');HistoryFixture $null $null @()
+Assert ($window.SubmissionUnknown -and $window.FixtureRecoveryCancelCount -eq 0) 'unconfirmed cancel was treated as terminal or replayed before history reconciliation'
+$window.FixtureRetryUnknown()
+Assert ($window.FixtureRecoveryCancelCount -eq 1 -and $window.FixtureRecoveryRunCount -eq 4) 'cancel recovery restarted generation instead of retrying cancel'
+$fixtureRun.status='cancelled';$fixtureRun.requestId='uncertain';HistoryFixture $null $fixtureRun @($fixtureRun)
+Assert (-not $window.IsBusy -and -not $window.SubmissionUnknown) 'terminal matching history did not release the recovery lock'
+$window.FixtureUnknown('uncertain-next')
+$window.FixtureEvent('cancel','request_not_found',$null)
+Assert (-not $window.IsBusy -and -not $window.SubmissionUnknown) 'authoritative cancel not-found did not release the lock'
 $fixtureRun.status='failed';$fixtureRun.requestId='uncertain';HistoryFixture $null $fixtureRun @($fixtureRun)
 Assert ($retry.IsEnabled -and -not $window.SubmissionUnknown) 'matched identity not resolved'
 $window.FixtureEvent('history','disconnected',$null)
@@ -1232,6 +1328,53 @@ $window.Close()
 Assert ($window.PlaybackCount -eq 0) 'owner close retained animation'
 QueueFrame (FixtureFrame $target $operation 999 $blueBytes)
 Assert ($null -eq (WindowField 'pendingCockpitFrame') -and (WindowField 'widgetClosed') -and -not (WindowField 'previewEventsAttached')) 'owner close accepted late Cockpit event'
+# A fresh window may cancel a run started elsewhere, without a local submitted payload.
+$cancelObserver=New-Object CodexNative.WidgetWindow $true;$fixtureWindows.Add($cancelObserver)
+$cancelObserver.FixtureAcceptCancel=$true
+$observedRun=@{runId='observed-run';requestId='observed-request';status='running';caseResults=@()}
+$observedHistory=[CodexNative.WidgetClient]::Serialize(@{available=$true;activeRun=$observedRun;runs=@($observedRun)})
+$cancelObserver.FixtureEvent('history',$null,$observedHistory)
+Assert ($cancelObserver.IsBusy -and $null -eq $cancelObserver.SubmittedRequest) 'observed-only cancellation fixture unexpectedly had a local submission'
+$cancelObserver.FixtureCancel()
+$cancelObserver.FixtureEvent('cancel','mutation_unknown',$null)
+$cancelObserver.FixtureEvent('history',$null,$observedHistory)
+$cancelObserver.FixtureRetryUnknown()
+Assert ($cancelObserver.FixtureRecoveryCancelCount -eq 1 -and $cancelObserver.FixtureRecoveryRunCount -eq 0) 'observed-only run could not retry its cancellation without a submitted payload'
+$observerClient=$cancelObserver.GetType().GetField('client',$flags).GetValue($cancelObserver)
+$observerGeneration=$observerClient.ServiceGeneration
+$observerClient.GetType().GetField('generation',$flags).SetValue($observerClient,$observerGeneration+1)
+$cancelObserver.FixtureEventAtGeneration('cancel',$null,'{}',$observerGeneration)
+$cancelObserver.FixtureEvent('history',$null,$observedHistory)
+$cancelObserver.FixtureRetryUnknown()
+Assert ($cancelObserver.FixtureRecoveryCancelCount -eq 2 -and $cancelObserver.IsBusy) 'service replacement left observed cancellation permanently pending'
+$cancelObserver.FixtureEvent('cancel','run_terminal',$null)
+Assert (-not $cancelObserver.IsBusy) 'authoritative terminal response did not settle an observed-only cancellation'
+$cancelObserver.Close()
+# A's queued reply may arrive after terminal history releases the controls and B starts.
+foreach($lateReply in 'cancel:request_not_found','cancel:run_terminal','cancel:mutation_unknown','cancel:success','run:submission_unknown','run:success') {
+    $identityWindow=New-Object CodexNative.WidgetWindow $true;$fixtureWindows.Add($identityWindow)
+    $identityWindow.FixtureAcceptRun=$true;$identityWindow.FixtureAcceptCancel=$true
+    $identityClient=$identityWindow.GetType().GetField('client',$flags).GetValue($identityWindow)
+    $identityField=$identityWindow.GetType().GetField('requestId',$flags)
+    $identityWindow.FixtureRun();$firstId=$identityField.GetValue($identityWindow)
+    $firstRun=@{runId='first-run';requestId=$firstId;status='running';caseResults=@()}
+    $identityWindow.FixtureEvent('history',$null,([CodexNative.WidgetClient]::Serialize(@{available=$true;activeRun=$firstRun;runs=@($firstRun)})))
+    $identityWindow.FixtureCancel()
+    $firstRun.status='cancelled'
+    $firstHistory=[CodexNative.WidgetClient]::Serialize(@{available=$true;activeRun=$null;latestRun=$firstRun;runs=@($firstRun)})
+    $identityWindow.FixtureEvent('history',$null,$firstHistory)
+    Assert (-not $identityWindow.IsBusy) 'terminal A history did not release the controls'
+    $identityWindow.FixtureRun();$secondId=$identityField.GetValue($identityWindow);$secondPayload=$identityWindow.SubmittedRequest;$secondState=$identityWindow.BenchState
+    Assert ($identityWindow.IsBusy -and $secondId -cne $firstId) 'B was not submitted after terminal A history'
+    $replyParts=$lateReply.Split(':');$replyError=if($replyParts[1] -ceq 'success'){$null}else{$replyParts[1]}
+    $identityWindow.FixtureEventForRequest($replyParts[0],$replyError,$firstHistory,$identityClient.ServiceGeneration,$firstId)
+    Assert ($identityField.GetValue($identityWindow) -ceq $secondId -and $identityWindow.IsBusy -and -not $identityWindow.SubmissionUnknown -and $identityWindow.BenchState -ceq $secondState -and [object]::ReferenceEquals($secondPayload,$identityWindow.SubmittedRequest)) ('late A reply changed B: '+$lateReply)
+    $identityWindow.FixtureEvent('run','submission_unknown',$null)
+    $identityWindow.FixtureEvent('history',$null,([CodexNative.WidgetClient]::Serialize(@{available=$true;runs=@()})))
+    $identityWindow.FixtureRetryUnknown()
+    Assert ($identityWindow.SubmissionUnknown -and $identityWindow.FixtureRecoveryRunCount -eq 1 -and $identityField.GetValue($identityWindow) -ceq $secondId -and [object]::ReferenceEquals($secondPayload,$identityWindow.SubmittedRequest)) ('B could not recover after late A reply: '+$lateReply)
+    $identityWindow.Close()
+}
 # Task list and task-scoped telemetry: allowlist, picker, pin/follow, stale/truncated, null usage,
 # stale-generation dropping, pinned-404 retention and diagnostics rendering.
 $window=New-Object CodexNative.WidgetWindow $true;$fixtureWindows.Add($window)
@@ -1366,7 +1509,7 @@ Assert (-not $window.TaskFlagsVisible -and [string]::IsNullOrEmpty($window.TaskF
 $mainText=VisibleUiText $window
 
 Assert (-not $window.CurrentTurnVisible -and -not $window.AgentsVisible -and $window.AgentsPanelControl.Children.Count -eq 0) 'dense current-turn/agent rows returned to the main window'
-Assert ($mainText -notmatch '1234|1290|代理[ ]*·|当前回合|基准|鹈鹕(?!测试)|刷新|可信时间|日志滞后|日志可能') 'rich payload leaked dense log/current-turn/agent/benchmark chrome into the main window'
+Assert ($mainText -notmatch '1234|1290|代理[ ]*·|当前回合|基准|鹈鹕(?!测试)|可信时间|日志滞后|日志可能') 'rich payload leaked dense log/current-turn/agent/benchmark chrome into the main window'
 Assert ($window.ContextVisible -and $window.ContextText -match 'gpt-6.1-sol' -and $window.EffortVisible -and $window.EffortText -match 'ultra') 'valid conversation model/effort missing'
 $window.UpdateLayout()
 $taskPinButton=$window.GetType().GetField('taskPin',$flags).GetValue($window)
@@ -1478,8 +1621,8 @@ InfoListUpdate
 InfoSampleApply
 $infoGeneration=$window.TaskGeneration
 Assert (-not $window.TaskFlagsVisible) 'fresh list and fresh task displayed warnings'
-Assert (([regex]::Matches((VisibleUiText $window),'当前对话 · 会话累计 · 历史日志 · 非实时')).Count -eq 1 -and (VisibleUiText $window) -notmatch '会话累计（日志）' -and (VisibleUiText $window) -notmatch '会话消耗 · tokens') 'legacy conversation caption missing, duplicated or mislabeled as a selected aggregate'
-Assert (([string]$window.MetricControls[0].ToolTip -ceq '输入 · 1234567 tokens') -and ([string]$window.MetricControls[2].ToolTip -ceq '合计 · 1234567 tokens')) 'exact invariant token tooltip missing on input/total'
+Assert (([regex]::Matches((VisibleUiText $window),'当前对话 · 会话累计 · 历史日志 · 非实时')).Count -eq 1 -and (VisibleUiText $window) -notmatch '会话累计（日志）' -and (VisibleUiText $window) -notmatch '会话消耗 · 词元') 'legacy conversation caption missing, duplicated or mislabeled as a selected aggregate'
+Assert (([string]$window.MetricControls[0].ToolTip -ceq '输入 · 1234567 词元') -and ([string]$window.MetricControls[2].ToolTip -ceq '合计 · 1234567 词元')) 'exact invariant token tooltip missing on input/total'
 Assert ([Windows.Automation.AutomationProperties]::GetHelpText($window.MetricControls[2]) -match '1234567') 'accessible help lost the exact total count'
 Assert ($window.MetricControls[1].Text -ceq '0') 'real zero count was hidden or reformatted'
 Assert ($window.ContextVisible -and $window.ContextText -match '未知' -and $window.EffortVisible -and $window.EffortText -match '未知') 'resolved session did not explicitly show unknown context and effort'
@@ -1489,8 +1632,8 @@ Assert ($window.TaskControl.SelectedItem.Label -match '11111111' -and $window.Ta
 Assert ([Windows.Automation.AutomationProperties]::GetHelpText($window.TaskControl) -match $infoTask -and $window.TaskControl.ToolTip -match $infoTask) 'accessible task identity lost the full task id'
 $infoSample.usage=@{inputTokens=9007199254740991;outputTokens=0;totalTokens=9007199254740991}
 InfoSampleApply
-Assert ([string]$window.MetricControls[0].ToolTip -ceq '输入 · 9007199254740991 tokens' -and [string]$window.MetricControls[2].ToolTip -ceq '合计 · 9007199254740991 tokens') 'maximum safe integer was rounded or reformatted in its exact tooltip'
-foreach($metric in @($window.MetricControls[0],$window.MetricControls[2])) { Assert ([Windows.Automation.AutomationProperties]::GetHelpText($metric) -match '9007199254740991' -and [Windows.Automation.AutomationProperties]::GetHelpText($metric) -match 'tokens') 'maximum safe integer was rounded in accessible help' }
+Assert ([string]$window.MetricControls[0].ToolTip -ceq '输入 · 9007199254740991 词元' -and [string]$window.MetricControls[2].ToolTip -ceq '合计 · 9007199254740991 词元') 'maximum safe integer was rounded or reformatted in its exact tooltip'
+foreach($metric in @($window.MetricControls[0],$window.MetricControls[2])) { Assert ([Windows.Automation.AutomationProperties]::GetHelpText($metric) -match '9007199254740991' -and [Windows.Automation.AutomationProperties]::GetHelpText($metric) -match '词元') 'maximum safe integer was rounded in accessible help' }
 $infoSample.usage=@{inputTokens=1234567;outputTokens=0;totalTokens=1234567}
 InfoSampleApply
 $infoList.stale=$true;$infoList.truncated=$true
@@ -1513,14 +1656,14 @@ Assert (-not $window.TaskFlagsVisible -and [string]::IsNullOrEmpty($window.TaskF
 $infoSample.usage=@{inputTokens=-1;outputTokens='unknown';totalTokens=$null}
 InfoSampleApply
 Assert ($window.MetricsVisible -and $window.MetricControls[0].Text -ceq '1.2M' -and $window.MetricControls[1].Text -ceq '0' -and $window.MetricControls[2].Text -ceq '1.2M' -and $window.SelectedUsageStateControl.Text -match '上次有效数据') 'invalid counts erased the last complete legacy triple'
-Assert ([string]$window.MetricControls[0].ToolTip -ceq '输入 · 1234567 tokens' -and [string]$window.MetricControls[2].ToolTip -ceq '合计 · 1234567 tokens' -and [Windows.Automation.AutomationProperties]::GetHelpText($window.MetricControls[2]) -match '1234567') 'invalid refresh erased exact retained tooltip or accessibility'
+Assert ([string]$window.MetricControls[0].ToolTip -ceq '输入 · 1234567 词元' -and [string]$window.MetricControls[2].ToolTip -ceq '合计 · 1234567 词元' -and [Windows.Automation.AutomationProperties]::GetHelpText($window.MetricControls[2]) -match '1234567') 'invalid refresh erased exact retained tooltip or accessibility'
 $infoSample.usage=@{inputTokens=10;outputTokens=0;totalTokens=10}
 InfoSampleApply
-Assert ([string]$window.MetricControls[0].ToolTip -ceq '输入 · 10 tokens') 'valid count lost its exact tooltip after an invalid refresh'
+Assert ([string]$window.MetricControls[0].ToolTip -ceq '输入 · 10 词元') 'valid count lost its exact tooltip after an invalid refresh'
 $window.FixtureTaskTelemetry($window.TaskGeneration,'disconnected',$null)
 $window.UpdateLayout()
 Assert ($window.MetricsVisible -and $window.ContextVisible -and $window.EffortVisible -and $window.MetricControls[2].Text -ceq '10' -and $window.SelectedUsageStateControl.Text -match '上次有效数据' -and $window.DisplayState -match '本地服务断连') 'telemetry disconnect erased validated data or hid historical/source-health labels'
-Assert ([string]$window.MetricControls[0].ToolTip -ceq '输入 · 10 tokens' -and [Windows.Automation.AutomationProperties]::GetHelpText($window.MetricControls[2]) -match '10 tokens') 'disconnect erased the retained exact tooltip/accessibility'
+Assert ([string]$window.MetricControls[0].ToolTip -ceq '输入 · 10 词元' -and [Windows.Automation.AutomationProperties]::GetHelpText($window.MetricControls[2]) -match '10 词元') 'disconnect erased the retained exact tooltip/accessibility'
 InfoSampleApply
 Assert ($window.MetricsVisible -and $window.MetricControls[0].Text -ne '—' -and -not $window.TaskFlagsVisible) 'recovered sample did not restore the metrics surface'
 Assert ((VisibleUiText $window) -match '上轮均速 · 回合未完成' -and $window.MetricControls[3].Text -ceq '—') 'unavailable speed lacks a visible short reason'
@@ -1528,12 +1671,12 @@ Assert ([string]$window.MetricControls[3].ToolTip -match '尚未完成') 'unavai
 $infoSample.lastCompletedTurn=@{state='available';source='turn_token_usage';reason='none';inputTokens=100;outputTokens=20;totalTokens=120;elapsedSeconds=5;startedAt='2026-10-16T09:00:00.000Z';completedAt=$infoObserved}
 $infoSample.turnAverageSpeed=@{state='available';source='completed_turn';reason='none';outputTokensPerSecond=4;completedAt=$infoObserved;includesToolsAndWait=$true}
 InfoSampleApply
-Assert ((VisibleUiText $window) -match '上轮均速 token/s' -and (VisibleUiText $window) -notmatch '上轮均速 · ' -and $window.MetricControls[3].Text -ceq '4.0') 'valid speed caption or value missing'
+Assert ((VisibleUiText $window) -match '上轮均速' -and (VisibleUiText $window) -notmatch '上轮均速 · ' -and $window.MetricControls[3].Text -ceq '4.0') 'valid speed caption or value missing'
 $infoSample.state='empty';$infoSample.session=$null;$infoSample.usage=$null;$infoSample.task=$null
 $infoSample.conversationContext=$null;$infoSample.lastCompletedTurn=$null;$infoSample.turnAverageSpeed=$null
 InfoSampleApply
 Assert ($window.MetricsVisible -and $window.ContextVisible -and $window.EffortVisible -and -not $window.CurrentTurnVisible -and $window.MetricControls[2].Text -ceq '10' -and $window.MetricControls[3].Text -ceq '4.0' -and $window.SelectedUsageStateControl.Text -match '上次有效数据') 'empty telemetry erased last validated counts/context/speed'
-Assert ([string]$window.MetricControls[0].ToolTip -ceq '输入 · 10 tokens' -and [Windows.Automation.AutomationProperties]::GetHelpText($window.MetricControls[2]) -match '10 tokens') 'empty telemetry cleared retained exact values'
+Assert ([string]$window.MetricControls[0].ToolTip -ceq '输入 · 10 词元' -and [Windows.Automation.AutomationProperties]::GetHelpText($window.MetricControls[2]) -match '10 词元') 'empty telemetry cleared retained exact values'
 $infoList.tasks=@(@{id=$taskBeta;title='New synthetic task';updatedAt=$infoObserved})
 InfoListUpdate
 InfoExactCleared
@@ -1652,6 +1795,7 @@ UsageFixture $usageGeneration $overallUsage $selectedUsage
 Assert ($null -eq $window.UsageWindow -and $window.OverallMetricControls[2].Text -ceq '300') 'background usage update opened a window or did not update detached controls'
 $usageEntry=@(Visuals $window | Where-Object {$_ -is [Windows.Controls.Button] -and [Windows.Automation.AutomationProperties]::GetAutomationId($_) -ceq 'Usage'})[0]
 Click $usageEntry
+$usageGeneration=$window.UsageGeneration
 $usagePopup=$window.UsageWindow;$usagePopup.UpdateLayout()
 $usageView=$window.GetType().GetField('usageView',$flags).GetValue($window)
 $chartViewport=$window.GetType().GetField('usageWindowViewport',$flags).GetValue($window)
@@ -1662,6 +1806,13 @@ Assert ($usagePopup.ActualWidth -eq $expectedUsageWidth -and $usagePopup.ActualH
 Assert ($chartViewport -is [Windows.Controls.ScrollViewer] -and [object]::ReferenceEquals($chartViewport.Content,$usageView) -and $chartViewport.VerticalScrollBarVisibility -eq [Windows.Controls.ScrollBarVisibility]::Auto -and $chartViewport.HorizontalScrollBarVisibility -eq [Windows.Controls.ScrollBarVisibility]::Disabled) 'usage surface is not mounted in its own vertical viewport'
 $usageClose=@(Visuals $usagePopup | Where-Object {$_ -is [Windows.Controls.Button] -and [Windows.Automation.AutomationProperties]::GetAutomationId($_) -ceq 'CloseUsage'})
 Assert ($usageClose.Count -eq 1 -and $usageClose[0].IsVisible -and $usageClose[0].Focusable -and $usageClose[0].IsTabStop) 'usage close action is missing, duplicated or inaccessible'
+$usageRefresh=@(Visuals $usagePopup | Where-Object {$_ -is [Windows.Controls.Button] -and [Windows.Automation.AutomationProperties]::GetAutomationId($_) -ceq 'RefreshUsage'})
+$usageSampledAt=@(Visuals $usagePopup | Where-Object {$_ -is [Windows.Controls.TextBlock] -and [Windows.Automation.AutomationProperties]::GetAutomationId($_) -ceq 'UsageSampledAt'})
+Assert ($usageRefresh.Count -eq 1 -and $usageRefresh[0].IsVisible -and $usageRefresh[0].Focusable -and $usageRefresh[0].IsTabStop -and $usageSampledAt.Count -eq 1 -and $usageSampledAt[0].IsVisible -and $usageSampledAt[0].Text -match '采样') 'usage refresh action or visible sampling time is missing'
+$refreshGeneration=$window.UsageGeneration;Click $usageRefresh[0]
+Assert ($window.UsageGeneration -eq $refreshGeneration -and -not $window.IsBusy) 'fixture usage refresh disturbed task or benchmark state'
+$usageGeneration=$window.UsageGeneration;UsageFixture $usageGeneration $overallUsage $selectedUsage
+Assert ($usageSampledAt[0].Text -match ([DateTimeOffset]::Parse($usageStamped).ToLocalTime().ToString('HH:mm:ss')) -and $window.GetType().GetField('overallCaption',$flags).GetValue($window).ToolTip -match 'Magpie|中转' -and $window.GetType().GetField('overallCaption',$flags).GetValue($window).ToolTip -match '上轮请求') 'refresh did not publish its sampling time and accounting basis'
 Assert (@(Visuals $window | Where-Object {[Windows.Automation.AutomationProperties]::GetAutomationId($_) -like 'Local*' -or [Windows.Automation.AutomationProperties]::GetAutomationId($_) -in @('UsageBarChart','UsageRangeSlider') -or $_ -is [Windows.Controls.Slider]}).Count -eq 0) 'opening usage put its controls back in the main visual tree'
 Assert ($window.MetricControls[0].Text -ceq '10' -and $window.MetricControls[1].Text -ceq '5' -and $window.MetricControls[2].Text -ceq '15' -and $window.MetricControls[3].Text -ceq '—') 'selected usage did not replace the session triple or preserve the speed cell'
 Assert ($window.OverallMetricControls[0].Text -ceq '100' -and $window.OverallMetricControls[1].Text -ceq '200' -and $window.OverallMetricControls[2].Text -ceq '300') 'overall usage did not render its independent triple'
@@ -1670,7 +1821,7 @@ $selectedUsageText=(VisibleUiText $window)+' '+(VisibleUiText $usagePopup)
 Assert ($selectedUsageText -match '输入' -and $selectedUsageText -match '输出' -and $selectedUsageText -match '合计') 'usage cards lost their visible input/output/total hierarchy'
 Assert ($window.OverallStateControl.Text -match '已统计部分' -and $window.OverallStateControl.Text -match '正在扫描' -and $window.OverallStateControl.IsVisible) 'partial overall state lacks reason or its explicit subset label'
 Assert ($window.SelectedUsageStateControl.Text -ceq '已核实' -and $window.SelectedUsageStateControl.IsVisible) 'available selected usage is not visibly labelled'
-Assert ($window.MetricControls[0].ToolTip -ceq '输入 · 10 tokens' -and $window.OverallMetricControls[2].ToolTip -ceq '合计 · 300 tokens') 'usage exact tooltips missing'
+Assert ($window.MetricControls[0].ToolTip -ceq '输入 · 10 词元' -and $window.OverallMetricControls[2].ToolTip -ceq '合计 · 300 词元') 'usage exact tooltips missing'
 
 # The chart changes only its date range, never the lifetime or selected totals.
 function ChartOverall([bool]$complete=$false,[bool]$legacy=$false) {
@@ -1722,7 +1873,7 @@ $chartScale=$window.GetType().GetField('usageScale',$flags).GetValue($window)
 $chartViewport=$window.GetType().GetField('usageWindowViewport',$flags).GetValue($window)
 Assert ($chartRange -is [Windows.Controls.Slider] -and $chartRange.Minimum -eq 0 -and $chartRange.Maximum -eq 4 -and $chartRange.Value -eq 0 -and $chartRange.IsSnapToTickEnabled -and $chartRange.IsTabStop) 'usage range slider is missing or cannot be used by keyboard'
 Assert ($chartTotal.Text -ceq '12' -and $chartBars.Count -eq 12 -and $window.OverallMetricControls[2].Text -ceq '120') 'default today chart does not show only today usage'
-Assert ($usagePopup.Title -ceq 'Codex 总用量' -and $chartBars[6].ToolTip -match '12:00 \+00:00 至 2026-10-16 14:00 \+00:00' -and $chartBars[6].ToolTip -match '不含结束时间' -and $chartBars[6].ToolTip -match '合计 12 tokens') 'today chart lost its exact hourly boundaries or usage-window title'
+Assert ($usagePopup.Title -ceq 'Codex 总用量' -and $chartBars[6].ToolTip -match '12:00 \+00:00 至 2026-10-16 14:00 \+00:00' -and $chartBars[6].ToolTip -match '不含结束时间' -and $chartBars[6].ToolTip -match '合计 12 词元') 'today chart lost its exact hourly boundaries or usage-window title'
 Assert ($chartRange.ToolTip -match '按记录确认时间' -and [Windows.Automation.AutomationProperties]::GetHelpText($window.GetType().GetField('usageBars',$flags).GetValue($window)) -match '按记录确认时间') 'usage timeline omitted its source-record confirmation-time basis'
 $legacyChart=ChartOverall $false $true
 UsageFixture $usageGeneration $legacyChart $selectedUsage
@@ -1755,8 +1906,8 @@ $chartRange.Value=4;$usagePopup.UpdateLayout()
 Assert ($chartTotal.Text -ceq '120' -and $chartBars.Count -eq 14 -and $window.OverallMetricControls[2].Text -ceq '120') 'all-time chart does not match deduplicated lifetime total'
 $chartRange.Value=1;$usagePopup.UpdateLayout()
 Assert ($chartTotal.Text -ceq '36' -and $chartBars.Count -eq 7 -and $window.OverallMetricControls[2].Text -ceq '120' -and $window.MetricControls[2].Text -ceq '15') '7-day range changed lifetime/selected totals or used the wrong interval'
-Assert (@($chartBars | Where-Object {$_.ToolTip -match '用量未知'}).Count -eq 5 -and @($chartBars | Where-Object {$_.ToolTip -match '合计 0 tokens'}).Count -eq 0) 'partial empty buckets were fabricated as zeros'
-Assert ($chartBars[0].ToolTip -match '2026-10-10' -and $chartBars[0].ToolTip -match '输入 20 · 输出 4 · 合计 24 tokens' -and [Windows.Automation.AutomationProperties]::GetHelpText($chartBars[0]) -match '24 tokens' -and $chartBars[0].Focusable) 'chart bars lost precise date/token details or keyboard accessibility'
+Assert (@($chartBars | Where-Object {$_.ToolTip -match '用量未知'}).Count -eq 5 -and @($chartBars | Where-Object {$_.ToolTip -match '合计 0 词元'}).Count -eq 0) 'partial empty buckets were fabricated as zeros'
+Assert ($chartBars[0].ToolTip -match '2026-10-10' -and $chartBars[0].ToolTip -match '输入 20 · 输出 4 · 合计 24 词元' -and [Windows.Automation.AutomationProperties]::GetHelpText($chartBars[0]) -match '24 词元' -and $chartBars[0].Focusable) 'chart bars lost precise date/token details or keyboard accessibility'
 Assert ($chartProgress.Text -match '文件 3/3' -and $chartProgress.Text -match '已计 4 个响应' -and $chartProgress.Text -match '覆盖未完成') 'chart scan progress is hidden or presents partial coverage as complete'
 $null=$usagePopup.Activate();$null=[Windows.Input.Keyboard]::Focus($chartRange);$usagePopup.UpdateLayout()
 Assert ($chartRange.IsKeyboardFocusWithin -and $chartRange.Template.FindName('Focus',$chartRange).Opacity -gt 0) 'range slider keyboard focus is invisible'
@@ -1772,7 +1923,7 @@ $chartRange.Value=3;$usagePopup.UpdateLayout()
 Assert ($chartTotal.Text -ceq '72' -and $chartBars.Count -eq 13) '90-day chart range did not update'
 UsageFixture $usageGeneration (ChartOverall $true) $selectedUsage
 $chartRange.Value=1;$usagePopup.UpdateLayout()
-Assert (@($chartBars | Where-Object {$_.ToolTip -match '合计 0 tokens'}).Count -eq 5 -and @($chartBars | Where-Object {$_.ToolTip -match '用量未知'}).Count -eq 0 -and $chartProgress.Text -match '扫描完整') 'complete empty buckets are not distinguished from unknown partial buckets'
+Assert (@($chartBars | Where-Object {$_.ToolTip -match '合计 0 词元'}).Count -eq 5 -and @($chartBars | Where-Object {$_.ToolTip -match '用量未知'}).Count -eq 0 -and $chartProgress.Text -match '扫描完整') 'complete empty buckets are not distinguished from unknown partial buckets'
 $emptyRange=ChartOverall
 $emptyRange.timeline.ranges[1].usage=$null
 $emptyRange.timeline.ranges[1].responsesCounted=0
@@ -1824,7 +1975,7 @@ foreach($completeNative in $false,$true){
     }
     UsageFixture $usageGeneration $nativeZero $selectedUsage
     $expectedKnown=$(if($completeNative){7}else{2});$expectedUnknown=7-$expectedKnown
-    Assert ($chartTotal.Text -ceq '0' -and $chartScale.Text -ceq '峰值 0' -and $chartNote.Text -match '已记录用量为 0' -and $window.OverallMetricControls[2].Text -ceq '0' -and @($chartBars | Where-Object {$_.ToolTip -match '合计 0 tokens'}).Count -eq $expectedKnown -and @($chartBars | Where-Object {$_.ToolTip -match '用量未知'}).Count -eq $expectedUnknown) ('native known-zero usage was hidden, fabricated or rejected; complete='+$completeNative)
+    Assert ($chartTotal.Text -ceq '0' -and $chartScale.Text -ceq '峰值 0' -and $chartNote.Text -match '已记录用量为 0' -and $window.OverallMetricControls[2].Text -ceq '0' -and @($chartBars | Where-Object {$_.ToolTip -match '合计 0 词元'}).Count -eq $expectedKnown -and @($chartBars | Where-Object {$_.ToolTip -match '用量未知'}).Count -eq $expectedUnknown) ('native known-zero usage was hidden, fabricated or rejected; complete='+$completeNative)
 }
 $nativeNoRecords=NativeChartOverall
 $nativeNoRecords.coverage.nativeIncrementsCounted=0
@@ -1919,6 +2070,7 @@ foreach($range in $closedChart.timeline.ranges){
     $bucket=@($range.buckets | Where-Object {[DateTimeOffset]::Parse($_.from) -le $latestRecord -and [DateTimeOffset]::Parse($_.to) -gt $latestRecord})[0]
     $bucket.usage.inputTokens+=10;$bucket.usage.outputTokens+=2;$bucket.usage.totalTokens+=12
 }
+$usageGeneration=$window.UsageGeneration
 UsageFixture $usageGeneration $closedChart $selectedUsage
 Assert ($null -eq $window.UsageWindow -and -not $chartTotal.IsVisible -and $chartTotal.Text -ceq '48' -and $window.OverallMetricControls[2].Text -ceq '132' -and $window.MetricControls[2].Text -ceq '15' -and $chartRange.Value -eq 1) 'closed usage stopped accepting snapshots, reopened itself or lost the selected range'
 $window.OpenUsage();$usagePopup=$window.UsageWindow;$usagePopup.UpdateLayout()
@@ -1931,6 +2083,7 @@ Assert ($usageEscape.Handled -and $null -eq $window.UsageWindow -and -not $usage
 PumpUntil {$usageEntry.IsKeyboardFocused}
 Assert ($usageEntry.IsKeyboardFocused -and $chartRange.Value -eq 1 -and $chartTotal.Text -ceq '48') 'Escape close lost the saved chart or main-entry focus'
 Click $usageEntry;$usagePopup=$window.UsageWindow;$usagePopup.UpdateLayout()
+$usageGeneration=$window.UsageGeneration
 $chartViewport=$window.GetType().GetField('usageWindowViewport',$flags).GetValue($window)
 Assert ($usagePopup.IsVisible -and $chartTotal.Text -ceq '48' -and $chartRange.Value -eq 1 -and $window.UsageGeneration -eq $usageLifecycleGeneration -and [object]::ReferenceEquals($window.SubmittedRequest,$usageLifecycleSubmission) -and -not $window.IsBusy) 'usage lifetime changed task generation, submitted a benchmark or reset the chart'
 $independentSettings.Close()
@@ -1958,7 +2111,7 @@ UsageFixture $usageGeneration $overallUsage $selectedUsage
 Assert ($window.MetricControls[0].Text -ceq '0' -and $window.MetricControls[2].Text -ceq '0') 'valid zero selected usage was hidden or dashed'
 $selectedUsage.usage=@{inputTokens=9007199254740991;outputTokens=0;totalTokens=9007199254740991}
 UsageFixture $usageGeneration $overallUsage $selectedUsage
-Assert ([string]$window.MetricControls[0].ToolTip -ceq '输入 · 9007199254740991 tokens' -and [string]$window.MetricControls[2].ToolTip -ceq '合计 · 9007199254740991 tokens') 'maximum safe usage integer was rounded in exact tooltips'
+Assert ([string]$window.MetricControls[0].ToolTip -ceq '输入 · 9007199254740991 词元' -and [string]$window.MetricControls[2].ToolTip -ceq '合计 · 9007199254740991 词元') 'maximum safe usage integer was rounded in exact tooltips'
 $selectedUsage.usage=@{inputTokens=10;outputTokens=5;totalTokens=15}
 UsageFixture $usageGeneration $overallUsage $selectedUsage
 
@@ -2020,7 +2173,7 @@ foreach($invalidSelected in @(
     if($invalidSelected.usage.totalTokens -eq 5){$invalidSelected.coverage.pendingFiles=1;$invalidSelected.coverage.completeFiles=2}
     UsageFixture $usageGeneration $validOverall $invalidSelected
     Assert ($window.MetricControls[0].Text -ceq '10' -and $window.MetricControls[1].Text -ceq '5' -and $window.MetricControls[2].Text -ceq '15' -and $window.SelectedUsageStateControl.Text -match '上次有效数据' -and $window.OverallMetricControls[2].Text -ceq '42') 'invalid selected identity/sum/coverage erased seeded data or independent overall'
-    Assert ([string]$window.MetricControls[2].ToolTip -ceq '合计 · 15 tokens' -and [Windows.Automation.AutomationProperties]::GetHelpText($window.MetricControls[2]) -match '15 tokens') 'rejected selected update erased exact retained tooltip/accessibility'
+    Assert ([string]$window.MetricControls[2].ToolTip -ceq '合计 · 15 词元' -and [Windows.Automation.AutomationProperties]::GetHelpText($window.MetricControls[2]) -match '15 词元') 'rejected selected update erased exact retained tooltip/accessibility'
 }
 UsageFixture $usageGeneration $validOverall $selectedUsage 'not-a-timestamp'
 Assert ($window.MetricControls[2].Text -ceq '15' -and $window.SelectedUsageStateControl.Text -match '上次有效数据' -and $window.OverallMetricControls[2].Text -ceq '—') 'invalid envelope did not retain selected independently while invalidating overall'
@@ -2092,7 +2245,7 @@ Assert (-not $window.UsagePending -and -not $window.UsageInFlight -and $window.S
 $window.FixtureUsage($window.UsageGeneration,'not_found',$null)
 Assert ($window.OverallMetricControls[0].Text -ceq '—' -and $window.MetricControls[0].Text -ceq '—' -and $window.OverallStateControl.Text -match 'Codex 总用量不可用') 'usage 404 fallback did not mark local totals unavailable'
 $window.FixtureTaskTelemetry($window.TaskGeneration,$null,([CodexNative.WidgetClient]::Serialize($legacy)))
-Assert ($window.MetricControls[2].Text -ceq '15' -and $window.MetricControls[0].ToolTip -ceq '输入 · 7 tokens') 'usage 404 fallback did not restore legacy session telemetry'
+Assert ($window.MetricControls[2].Text -ceq '15' -and $window.MetricControls[0].ToolTip -ceq '输入 · 7 词元') 'usage 404 fallback did not restore legacy session telemetry'
 
 # Response sampling order and validated usage log time are independent clocks.
 $watermarkDataAt='2026-10-16T09:00:01.000Z'
@@ -2181,13 +2334,15 @@ function ObservedLiveSample {
 function ApplyLiveFixture($sample){$liveWindow.FixtureLive($true,$liveWindow.TaskGeneration,$null,([CodexNative.WidgetClient]::Serialize($sample)))}
 $liveWindow=New-Object CodexNative.WidgetWindow $true;$fixtureWindows.Add($liveWindow)
 $liveWindow.Show();$liveWindow.UpdateLayout()
+$mainLiveRefresh=@(Visuals $liveWindow | Where-Object {$_ -is [Windows.Controls.Button] -and [Windows.Automation.AutomationProperties]::GetAutomationId($_) -ceq 'RefreshLive'})
+Assert ($mainLiveRefresh.Count -eq 1 -and $mainLiveRefresh[0].IsVisible -and $mainLiveRefresh[0].IsEnabled -and $mainLiveRefresh[0].Content -ceq '刷新') 'main live window has no visible accessible refresh button'
 $liveSpeedCaption=$liveWindow.GetType().GetField('speedCaption',$allFields).GetValue($liveWindow)
 $liveWindow.FixtureLive($true,$liveWindow.TaskGeneration,'disconnected',$null)
 $liveWindow.FixtureTasks($tasksJson)
 $liveSample=LiveSample
 ApplyLiveFixture $liveSample
 Assert ($liveWindow.SelectedTask -ceq $taskAlpha -and -not $liveWindow.PinnedTask -and $liveWindow.MetricControls[2].Text -ceq '42' -and $liveWindow.SelectedUsageCaptionControl.Text -match '活动对话.*22222222.*会话累计') 'live identity borrowed the latest historical task or omitted confirmed scope'
-Assert ($liveWindow.ContextText -ceq '执行模型 · example-provider/gpt-6.1-sol' -and $liveWindow.EffortText -ceq '推理强度 · ultra' -and $liveWindow.MetricControls[3].Text -ceq '2.0' -and $liveWindow.MetricControls[3].ToolTip -match '已确认请求' -and $liveSpeedCaption.Text -ceq '请求均速 token/s') 'live execution evidence or confirmed request speed did not render'
+Assert ($liveWindow.ContextText -ceq '执行模型 · example-provider/gpt-6.1-sol' -and $liveWindow.EffortText -ceq '推理强度 · ultra' -and $liveWindow.MetricControls[3].Text -ceq '2.0' -and $liveWindow.MetricControls[3].ToolTip -match '已确认请求' -and $liveSpeedCaption.Text -ceq '请求均速') 'live execution evidence or confirmed request speed did not render'
 Assert ($liveWindow.SelectedUsageCaptionControl.ToolTip -match '输入含缓存与多次请求的重复输入' -and $liveWindow.SelectedUsageCaptionControl.ToolTip -match '先前基线' -and $liveWindow.SelectedUsageCaptionControl.ToolTip -match '不等于本机扫描的已核实历史合计' -and $liveWindow.SelectedUsageCaptionControl.ToolTip -match '上下文占用或账户账单') 'live conversation cumulative tooltip omitted its accounting limits or unknown prior baseline'
 # 缓存命中率（cachedInputTokens / inputTokens）是 live 卡片的附加指标：缺失时必须保持未知而不是拒收快照。
 $liveCacheRate=$liveWindow.CacheHitRateControl;$liveCacheCaption=$liveWindow.CacheHitRateCaptionControl
@@ -2195,7 +2350,7 @@ Assert ($null -ne $liveCacheRate -and $null -ne $liveCacheCaption -and $liveCach
 Assert ($liveCacheRate.Text -ceq '—' -and [string]$liveCacheRate.ToolTip -match '缓存输入 / 输入' -and [string]$liveCacheRate.ToolTip -match '会话累计' -and [Windows.Automation.AutomationProperties]::GetHelpText($liveCacheRate) -ceq [string]$liveCacheRate.ToolTip) 'absent cachedInputTokens did not render a documented unknown'
 $cachedLive=LiveSample;$cachedLive.usage.cachedInputTokens=33
 ApplyLiveFixture $cachedLive
-Assert ($liveCacheRate.Text -ceq '82.5%' -and [string]$liveCacheRate.ToolTip -match '缓存输入 33 tokens' -and [string]$liveCacheRate.ToolTip -match '输入 40 tokens' -and [Windows.Automation.AutomationProperties]::GetHelpText($liveCacheRate) -ceq [string]$liveCacheRate.ToolTip) 'cached input did not render a one-decimal hit rate with its exact numerator and denominator'
+Assert ($liveCacheRate.Text -ceq '82.5%' -and [string]$liveCacheRate.ToolTip -match '缓存输入 33 词元' -and [string]$liveCacheRate.ToolTip -match '输入 40 词元' -and [Windows.Automation.AutomationProperties]::GetHelpText($liveCacheRate) -ceq [string]$liveCacheRate.ToolTip) 'cached input did not render a one-decimal hit rate with its exact numerator and denominator'
 $cachedFull=LiveSample;$cachedFull.usage.cachedInputTokens=40
 ApplyLiveFixture $cachedFull
 Assert ($liveCacheRate.Text -ceq '100.0%') 'a fully cached conversation was not shown as 100.0%'
@@ -2208,9 +2363,13 @@ foreach($badCached in @(-1,'33',1.5,41,$null)){
 $zeroCachedLive=LiveSample;$zeroCachedLive.usage.inputTokens=0;$zeroCachedLive.usage.outputTokens=0;$zeroCachedLive.usage.totalTokens=0;$zeroCachedLive.usage.cachedInputTokens=0;$zeroCachedLive.speed.outputTokensPerSecond=0
 ApplyLiveFixture $zeroCachedLive
 Assert ($liveWindow.MetricControls[2].Text -ceq '0' -and $liveCacheRate.Text -ceq '—' -and [string]$liveCacheRate.ToolTip -match '输入为 0') 'zero-input conversation invented a hit rate instead of an explained unknown'
-$gatewayLive=LiveSample;$gatewayLive.source='magpie_gateway';$gatewayLive.usage.includesSubagents=$true;$gatewayLive.lifecycle.state='completed';$gatewayLive.lifecycle.completedAt=$gatewayLive.observedAt
+$gatewayLive=LiveSample;$gatewayLive.source='magpie_gateway';$gatewayLive.observedAt='2026-10-18T09:00:05.000Z';$gatewayLive.usage=@{scope='conversation';includesSubagents=$false;inputTokens=500;outputTokens=70;totalTokens=570;cachedInputTokens=350};$gatewayLive.speed.observedAt=$gatewayLive.observedAt;$gatewayLive.gateway=@{state='partial';observedAt=$gatewayLive.observedAt;matchedRequests=4;countedRequests=3};$gatewayLive.lifecycle.state='completed';$gatewayLive.lifecycle.completedAt=$gatewayLive.observedAt
 ApplyLiveFixture $gatewayLive
-Assert ($liveWindow.SelectedUsageStateControl.Text -match 'Magpie.*已完成' -and $liveWindow.SelectedUsageCaptionControl.ToolTip -match '包含已核实代理' -and $liveWindow.MetricControls[2].Text -ceq '42') 'confirmed gateway lifecycle or subagent scope did not render'
+$gatewaySampleClock=[DateTimeOffset]::Parse($gatewayLive.sampledAt).ToLocalTime().ToString('HH:mm:ss')
+Assert ($liveWindow.SelectedUsageStateControl.Text -match '已统计部分[\s\S]*Magpie 逐请求' -and $liveWindow.SelectedUsageStateControl.Text -match ('采样 '+$gatewaySampleClock) -and $liveWindow.SelectedUsageCaptionControl.ToolTip -match '输入 = 新输入 \+ 缓存输入' -and $liveWindow.SelectedUsageCaptionControl.ToolTip -match '499' -and $liveWindow.SelectedUsageCaptionControl.ToolTip -match '同一会话' -and $liveWindow.MetricControls[2].Text -ceq '570' -and $liveCacheRate.Text -ceq '70.0%') ('Magpie same-session counters, partial state, sampling time or accounting basis did not render: state='+$liveWindow.SelectedUsageStateControl.Text+' tip='+$liveWindow.SelectedUsageCaptionControl.ToolTip+' total='+$liveWindow.MetricControls[2].Text+' cache='+$liveCacheRate.Text)
+$retainedLive=LiveSample;$retainedLive.source='magpie_gateway';$retainedLive.reason='source_disconnected';$retainedLive.observedAt='2026-10-18T09:00:05.000Z';$retainedLive.usage=@{scope='conversation';includesSubagents=$false;inputTokens=500;outputTokens=70;totalTokens=570;cachedInputTokens=350;last=@{inputTokens=30;outputTokens=1;totalTokens=31;cachedInputTokens=20}};$retainedLive.speed=$null;$retainedLive.lifecycle=$null;$retainedLive.gateway=@{state='available';observedAt=$retainedLive.observedAt;matchedRequests=4;countedRequests=4}
+ApplyLiveFixture $retainedLive
+Assert ($liveWindow.SelectedUsageStateControl.Text -match 'Magpie 累计 · Codex 已断连' -and $liveWindow.SelectedUsageStateControl.Text -notmatch '运行中' -and $liveWindow.SelectedUsageCaptionControl.ToolTip -match '保留最近核实的会话身份与上轮请求' -and $liveWindow.MetricControls[2].Text -ceq '570' -and $liveWindow.LastRequestControl.Text -ceq '上轮请求 · 新输入 10 · 缓存 20 · 输出 1') '断连保留数据未明确标注，或丢失了 Magpie 合计与上轮请求'
 # 「上轮请求」是单次请求口径，用户拿它和中转站的单条用量记录逐条对照。
 $liveLastRequest=$liveWindow.LastRequestControl
 Assert ($null -ne $liveLastRequest) 'live last-request element is missing'
@@ -2218,7 +2377,7 @@ ApplyLiveFixture (LiveSample)
 Assert ($liveLastRequest.Text -ceq '上轮请求 · —' -and [string]$liveLastRequest.ToolTip -match '上游未提供有效的最近一次请求计数' -and [Windows.Automation.AutomationProperties]::GetHelpText($liveLastRequest) -ceq [string]$liveLastRequest.ToolTip) 'absent last counters did not render a documented unknown'
 $lastLive=LiveSample;$lastLive.usage.last=@{inputTokens=30;outputTokens=1;totalTokens=31;cachedInputTokens=20}
 ApplyLiveFixture $lastLive
-Assert ($liveLastRequest.Text -ceq '上轮请求 · 新输入 10 · 缓存 20 · 输出 1' -and [string]$liveLastRequest.ToolTip -match '缓存输入 20 tokens' -and [string]$liveLastRequest.ToolTip -match '新输入 10 tokens' -and [string]$liveLastRequest.ToolTip -match '合计 31 tokens') ('last request counters did not render their decomposition: '+$liveLastRequest.Text)
+Assert ($liveLastRequest.Text -ceq '上轮请求 · 新输入 10 · 缓存 20 · 输出 1' -and [string]$liveLastRequest.ToolTip -match '缓存输入 20 词元' -and [string]$liveLastRequest.ToolTip -match '新输入 10 词元' -and [string]$liveLastRequest.ToolTip -match '合计 31 词元') ('last request counters did not render their decomposition: '+$liveLastRequest.Text)
 foreach($badLastCached in @(-1,'20',1.5,31)){
  $badLast=LiveSample;$badLast.usage.last=@{inputTokens=30;outputTokens=1;totalTokens=31;cachedInputTokens=$badLastCached}
  ApplyLiveFixture $badLast
@@ -2252,7 +2411,7 @@ foreach($usageError in 'not_found','disconnected','task_not_found'){
 foreach($scope in 'turn','request','conversation'){
  $scopeSample=LiveSample $taskBeta $scope;ApplyLiveFixture $scopeSample
  $expectedScope=@{turn='本回合（已确认）';request='本次请求（已确认）';conversation='会话累计'}[$scope]
- Assert ($liveWindow.SelectedUsageCaptionControl.Text.Contains($expectedScope) -and $liveWindow.MetricControls[2].ToolTip -ceq '合计 · 42 tokens') ('live scope mislabeled: '+$scope)
+ Assert ($liveWindow.SelectedUsageCaptionControl.Text.Contains($expectedScope) -and $liveWindow.MetricControls[2].ToolTip -ceq '合计 · 42 词元') ('live scope mislabeled: '+$scope)
 }
 $unknownLive=LiveSample;$unknownLive.usage=$null;$unknownLive.model=$null;$unknownLive.reasoningEffort=$null;$unknownLive.speed=$null
 ApplyLiveFixture $unknownLive
@@ -2262,15 +2421,15 @@ ApplyLiveFixture $zeroLive
 Assert ($liveWindow.MetricControls[0].Text -ceq '0' -and $liveWindow.MetricControls[1].Text -ceq '0' -and $liveWindow.MetricControls[2].Text -ceq '0' -and $liveWindow.MetricControls[3].Text -ceq '0') 'confirmed zero was confused with unknown live usage'
 $observedLive=ObservedLiveSample
 ApplyLiveFixture $observedLive
-Assert ($liveWindow.MetricControls[2].Text -ceq '42' -and $liveWindow.MetricControls[3].Text -ceq '1.0' -and $liveSpeedCaption.Text -ceq '观测均速 ≈ token/s') 'observed cumulative-delta speed did not render as an estimate'
+Assert ($liveWindow.MetricControls[2].Text -ceq '42' -and $liveWindow.MetricControls[3].Text -ceq '1.0' -and $liveSpeedCaption.Text -ceq '实时均速 ≈') 'observed cumulative-delta speed did not render as an estimate'
 $observedSpeedTip=[string]$liveWindow.MetricControls[3].ToolTip
-Assert ($observedSpeedTip -match '已确认累计输出差量 / 观测时间' -and $observedSpeedTip -match '估算，包含工具、等待和用量上报延迟' -and $observedSpeedTip -match '不代表模型逐token流速' -and $observedSpeedTip -match '输出差量 2 tokens' -and $observedSpeedTip -match '观测时间 2 s' -and $observedSpeedTip -match '2026-10-18T09:00:03.000Z' -and $observedSpeedTip -match '2026-10-18T09:00:05.000Z' -and [Windows.Automation.AutomationProperties]::GetHelpText($liveWindow.MetricControls[3]) -ceq $observedSpeedTip -and [string]$liveSpeedCaption.ToolTip -ceq $observedSpeedTip) 'observed speed lost exact numerator, denominator, source clocks or accessible estimation limits'
+Assert ($observedSpeedTip -match '已确认累计输出差量 / 本地观测时间' -and $observedSpeedTip -match '按最近用量变化实时计算，包含工具、等待和用量上报延迟' -and $observedSpeedTip -match '不代表模型逐词元流速' -and $observedSpeedTip -match '输出差量 2 词元' -and $observedSpeedTip -match '观测时间 2 秒' -and $observedSpeedTip -match '2026-10-18T09:00:03.000Z' -and $observedSpeedTip -match '2026-10-18T09:00:05.000Z' -and [Windows.Automation.AutomationProperties]::GetHelpText($liveWindow.MetricControls[3]) -ceq $observedSpeedTip -and [string]$liveSpeedCaption.ToolTip -ceq $observedSpeedTip) 'observed speed lost exact numerator, denominator, source clocks or accessible estimation limits'
 $noSpeedLive=LiveSample;$noSpeedLive.speed=$null
 ApplyLiveFixture $noSpeedLive
-Assert ($liveWindow.MetricControls[2].Text -ceq '42' -and $liveWindow.MetricControls[3].Text -ceq '—' -and $liveSpeedCaption.Text -ceq '观测均速 · 待采样' -and $liveWindow.MetricControls[3].ToolTip -match '同一对话至少两次有效计数更新' -and $liveWindow.MetricControls[3].ToolTip -match '断连、无更新或计数回退会清除' -and $liveWindow.MetricControls[3].ToolTip -notmatch '输出差量 2 tokens') 'null speed retained a previous rate, denominator or misleading request caption'
+Assert ($liveWindow.MetricControls[2].Text -ceq '42' -and $liveWindow.MetricControls[3].Text -ceq '—' -and $liveSpeedCaption.Text -ceq '实时均速 · 待采样' -and $liveWindow.MetricControls[3].ToolTip -match '同一对话至少两次有效计数更新' -and $liveWindow.MetricControls[3].ToolTip -match '断连、无更新或计数回退会清除' -and $liveWindow.MetricControls[3].ToolTip -notmatch '输出差量 2 词元') 'null speed retained a previous rate, denominator or misleading request caption'
 $observedZero=ObservedLiveSample;$observedZero.usage.inputTokens=0;$observedZero.usage.outputTokens=0;$observedZero.usage.totalTokens=0;$observedZero.speed.outputTokens=0;$observedZero.speed.outputTokensPerSecond=0
 ApplyLiveFixture $observedZero
-Assert ($liveWindow.MetricControls[3].Text -ceq '0' -and $liveSpeedCaption.Text -ceq '观测均速 ≈ token/s') 'valid zero observed delta was treated as unknown'
+Assert ($liveWindow.MetricControls[3].Text -ceq '0' -and $liveSpeedCaption.Text -ceq '实时均速 ≈') 'valid zero observed delta was treated as unknown'
 $observedTolerance=ObservedLiveSample;$observedTolerance.speed.elapsedSeconds=2.001;$observedTolerance.speed.outputTokensPerSecond=2/2.001
 ApplyLiveFixture $observedTolerance
 Assert ($liveWindow.MetricControls[2].Text -ceq '42' -and $liveWindow.MetricControls[3].Text -ceq '1.0') 'observed duration rejected the allowed one-millisecond clock tolerance'
@@ -2304,12 +2463,12 @@ foreach($fault in $badObservedCases){
   'includes-wait-string' {$badObserved.speed.includesToolsAndWait='true'}
  }
  ApplyLiveFixture $badObserved
- Assert ($liveWindow.MetricControls[2].Text -ceq '—' -and $liveWindow.MetricControls[3].Text -ceq '—' -and $liveWindow.SelectedUsageStateControl.Text -match '实时数据无效' -and $liveSpeedCaption.Text -ceq '观测均速 · 待采样') ('invalid observed speed was displayed or retained: '+$fault)
+ Assert ($liveWindow.MetricControls[2].Text -ceq '—' -and $liveWindow.MetricControls[3].Text -ceq '—' -and $liveWindow.SelectedUsageStateControl.Text -match '实时数据无效' -and $liveSpeedCaption.Text -ceq '实时均速 · 待采样') ('invalid observed speed was displayed or retained: '+$fault)
  ApplyLiveFixture (ObservedLiveSample)
  Assert ($liveWindow.MetricControls[2].Text -ceq '42' -and $liveWindow.MetricControls[3].Text -ceq '1.0') ('valid observed speed could not recover: '+$fault)
 }
 ApplyLiveFixture (LiveSample)
-Assert ($liveWindow.MetricControls[3].Text -ceq '2.0' -and $liveSpeedCaption.Text -ceq '请求均速 token/s' -and $liveWindow.MetricControls[3].ToolTip -match '已确认请求') 'confirmed request speed compatibility failed after observed-window samples'
+Assert ($liveWindow.MetricControls[3].Text -ceq '2.0' -and $liveSpeedCaption.Text -ceq '请求均速' -and $liveWindow.MetricControls[3].ToolTip -match '已确认请求') 'confirmed request speed compatibility failed after observed-window samples'
 $badLiveCases=@('source','source-none','scope','identity','identity-newline','sum','negative','unsafe-integer','string-count','agents','speed-source','speed-future','speed-negative','lifecycle','lifecycle-time','reason','observedAt','sampledAt')
 foreach($fault in $badLiveCases){
  $badLive=LiveSample
@@ -2394,6 +2553,11 @@ foreach($staleLiveError in @($null,'disconnected')){
 }
 ApplyLiveFixture (LiveSample)
 Assert ($liveWindow.MetricControls[2].Text -ceq '42') 'current service live snapshot failed to recover'
+$gatewaySpeedLive=LiveSample;$gatewaySpeedLive.source='magpie_gateway';$gatewaySpeedLive.sampledAt='2026-10-18T09:00:12.000Z';$gatewaySpeedLive.observedAt='2026-10-18T09:00:05.000Z';$gatewaySpeedLive.usage=@{scope='conversation';includesSubagents=$false;inputTokens=500;outputTokens=170;totalTokens=670;cachedInputTokens=350};$gatewaySpeedLive.speed=@{source='observed_window';outputTokensPerSecond=50;outputTokens=100;elapsedSeconds=2;startedAt='2026-10-18T09:00:10.000Z';observedAt='2026-10-18T09:00:12.000Z';includesToolsAndWait=$true};$gatewaySpeedLive.gateway=@{state='available';observedAt=$gatewaySpeedLive.observedAt;matchedRequests=5;countedRequests=5}
+ApplyLiveFixture $gatewaySpeedLive
+$liveSpeedUnit=@(Visuals $liveWindow | Where-Object {$_ -is [Windows.Controls.TextBlock] -and [Windows.Automation.AutomationProperties]::GetAutomationId($_) -ceq 'SpeedUnit'})
+Assert ($liveSpeedUnit.Count -eq 1 -and $liveSpeedUnit[0].IsVisible -and $liveSpeedUnit[0].Text -ceq 't/s' -and $liveSpeedUnit[0].ToolTip -match '本地观测时间') 't/s 单位未作为独立后缀显示在速度数值之后'
+Assert ($liveWindow.MetricControls[3].Text -ceq '50.0' -and $liveSpeedCaption.Text -ceq '实时均速 ≈' -and $liveWindow.MetricControls[3].ToolTip -match '本地观测时间' -and $liveWindow.MetricControls[3].ToolTip -match '按最近用量变化实时计算') ('Magpie 本地观测速度被旧日志时间拒绝，或实时中文标签未显示：状态='+$liveWindow.SelectedUsageStateControl.Text+'；速度='+$liveWindow.MetricControls[3].Text+'；标题='+$liveSpeedCaption.Text+'；提示='+$liveWindow.MetricControls[3].ToolTip)
 $liveWindow.Close()
 
 # GET allowlist, response caps and cancellation retain the same contract on the live route.
@@ -2438,6 +2602,20 @@ for($liveRequest=0;$liveRequest -lt 3;$liveRequest++){
  $expectedQuery='';if($liveRequest -eq 2){$expectedQuery='?taskId='+$taskAlpha}
  Assert ($handler.LastLiveQuery -ceq $expectedQuery -and $handler.LiveHits -eq $liveRequest+1 -and $handler.Origin -and $handler.Posts -eq 0 -and $liveHttpWindow.MetricControls[2].Text -ceq '42') 'live request query did not follow explicit pin semantics'
 }
+$liveRefreshHttp=$liveHttpWindow.GetType().GetMethod('RefreshLive',$flags)
+$gatewayRefresh=LiveSample $taskAlpha;$gatewayRefresh.source='magpie_gateway';$gatewayRefresh.observedAt='2026-10-18T09:00:06.000Z';$gatewayRefresh.usage=@{scope='conversation';includesSubagents=$false;inputTokens=500;outputTokens=70;totalTokens=570;cachedInputTokens=350};$gatewayRefresh.gateway=@{state='available';observedAt=$gatewayRefresh.observedAt;matchedRequests=4;countedRequests=4};$gatewayRefresh.speed=$null
+$handler.LiveRefreshPayload=[CodexNative.WidgetClient]::Serialize($gatewayRefresh)
+$null=$liveRefreshHttp.Invoke($liveHttpWindow,$null)
+PumpUntilLabeled 'live HTTP manual refresh' {$liveHttpClient.HasQueuedEvents -and -not (ClientInFlight $liveHttpClient 'live-refresh')}
+$refreshEvent=$null;Assert ($liveHttpClient.Dequeue([ref]$refreshEvent) -and $refreshEvent.Kind -ceq 'live-refresh' -and $null -eq $refreshEvent.Error) 'manual live refresh did not queue its response'
+$null=$httpApply.Invoke($liveHttpWindow,[object[]]@($refreshEvent.psobject.BaseObject))
+$refreshBody=[CodexNative.WidgetClient]::Json($handler.LastLiveRefreshBody)
+Assert ($handler.LiveRefreshHits -eq 1 -and $handler.Posts -eq 1 -and $refreshBody.taskId -ceq $taskAlpha -and $liveHttpWindow.MetricControls[2].Text -ceq '570' -and $liveHttpWindow.SelectedUsageStateControl.Text -match 'Magpie 逐请求累计') 'main-window refresh did not POST the pinned conversation and apply Magpie totals'
+$handler.LiveRefreshError='refresh_failed';$null=$liveRefreshHttp.Invoke($liveHttpWindow,$null)
+PumpUntilLabeled 'live HTTP refresh failure' {$liveHttpClient.HasQueuedEvents -and -not (ClientInFlight $liveHttpClient 'live-refresh')}
+$refreshErrorEvent=$null;Assert ($liveHttpClient.Dequeue([ref]$refreshErrorEvent) -and $refreshErrorEvent.Kind -ceq 'live-refresh' -and $null -ne $refreshErrorEvent.Error) 'live refresh error was not queued'
+$null=$httpApply.Invoke($liveHttpWindow,[object[]]@($refreshErrorEvent.psobject.BaseObject))
+Assert ($liveHttpWindow.MetricControls[2].Text -ceq '570' -and $liveHttpWindow.SelectedUsageStateControl.Text -match '刷新失败.*保留上次数据') 'live refresh failure erased valid Magpie counters'
 $liveHttpWindow.Close()
 # One live request owns its slot. A service-generation boundary drops its success and error.
 foreach($liveFails in $false,$true){
@@ -2496,15 +2674,35 @@ $null=$requestUsage.Invoke($usageWindow,@($false))
  PumpUntilLabeled 'first usage response' {$usageClient.HasQueuedEvents}
 $drainUsage.Invoke($usageWindow,$null)
 Assert ($usageWindow.OverallMetricControls[2].Text -ceq '42') 'first usage response was not applied'
-$usageUiRequests=$handler.Requests;$usageUiHits=$handler.UsageHits;$usageUiGeneration=$usageWindow.UsageGeneration
-$usageUiPending=$usageWindow.UsagePending;$usageUiInFlight=$usageWindow.UsageInFlight
-$usageWindow.Show();$usageWindow.OpenUsage();$usageHttpPopup=$usageWindow.UsageWindow;$usageHttpPopup.UpdateLayout()
-$usageHttpClose=@(Visuals $usageHttpPopup | Where-Object {$_ -is [Windows.Controls.Button] -and [Windows.Automation.AutomationProperties]::GetAutomationId($_) -ceq 'CloseUsage'})[0]
-Click $usageHttpClose;$usageWindow.OpenUsage();$usageWindow.UsageWindow.Close()
-$script:usageUiTurn=$false
-$null=[Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvoke([Windows.Threading.DispatcherPriority]::Background,[Action]{$script:usageUiTurn=$true})
-PumpUntil {$script:usageUiTurn}
-Assert ($handler.Requests -eq $usageUiRequests -and $handler.UsageHits -eq $usageUiHits -and $handler.Posts -eq 0 -and $null -eq $usageWindow.SubmittedRequest -and $usageWindow.UsageGeneration -eq $usageUiGeneration -and $usageWindow.UsagePending -eq $usageUiPending -and $usageWindow.UsageInFlight -eq $usageUiInFlight -and $usageWindow.OverallMetricControls[2].Text -ceq '42') 'usage window lifecycle requested another snapshot, benchmark or changed the polling state'
+# A real visible usage window refreshes on open, on demand and on the visible auto-refresh cadence.
+$refreshHandler=New-Object NativeFixtureHandler
+$refreshHandler.UsagePayload=[CodexNative.WidgetClient]::Serialize($firstUsage)
+$refreshHandler.UsageRefreshPayload=$refreshHandler.UsagePayload
+$refreshWindow=New-Object CodexNative.WidgetWindow $false,$refreshHandler,$true;$fixtureWindows.Add($refreshWindow)
+$refreshClient=$refreshWindow.GetType().GetField('client',$flags).GetValue($refreshWindow)
+$refreshDrain=$refreshWindow.GetType().GetMethod('DrainClientEvents',$allFields)
+$refreshPoll=$refreshWindow.GetType().GetMethod('Poll',$allFields)
+$refreshWindow.Show();$refreshWindow.OpenUsage();$refreshPopup=$refreshWindow.UsageWindow;$refreshPopup.UpdateLayout()
+PumpUntilLabeled 'usage open refresh' {$refreshHandler.UsageRefreshHits -eq 1 -and $refreshHandler.UsageHits -ge 1}
+$refreshDrain.Invoke($refreshWindow,$null)
+Assert ($refreshWindow.OverallMetricControls[2].Text -ceq '42' -and $refreshHandler.Posts -ge 1 -and $null -eq $refreshWindow.SubmittedRequest) 'opening usage did not fetch and render a refreshed snapshot'
+$refreshButton=@(Visuals $refreshPopup | Where-Object {$_ -is [Windows.Controls.Button] -and [Windows.Automation.AutomationProperties]::GetAutomationId($_) -ceq 'RefreshUsage'})[0]
+Click $refreshButton
+PumpUntilLabeled 'usage manual refresh' {$refreshHandler.UsageRefreshHits -eq 2}
+$refreshDrain.Invoke($refreshWindow,$null)
+$null=$refreshPoll.Invoke($refreshWindow,$null)
+PumpUntilLabeled 'usage poll inside refresh cadence' {$refreshHandler.UsageHits -ge 2}
+$refreshDrain.Invoke($refreshWindow,$null)
+Assert ($refreshHandler.UsageRefreshHits -eq 2) 'visible polling ignored the five-second refresh cadence'
+$refreshWindow.GetType().GetField('usageNextRefresh',$allFields).SetValue($refreshWindow,[DateTime]::UtcNow.AddSeconds(-1))
+$null=$refreshPoll.Invoke($refreshWindow,$null)
+PumpUntilLabeled 'usage automatic refresh' {$refreshHandler.UsageRefreshHits -eq 3}
+$refreshDrain.Invoke($refreshWindow,$null)
+$refreshPopup.Close()
+$refreshWindow.GetType().GetField('usageNextRefresh',$allFields).SetValue($refreshWindow,[DateTime]::UtcNow.AddSeconds(-1))
+$null=$refreshPoll.Invoke($refreshWindow,$null)
+Assert ($refreshHandler.UsageRefreshHits -eq 3) 'closed usage window continued full background refreshes'
+$refreshWindow.Close()
 $generationBeforeRace=$usageClient.ServiceGeneration
 $null=$requestUsage.Invoke($usageWindow,@($false))
  PumpUntilLabeled 'held second usage response' {$handler.UsageHits -ge 2 -and $null -ne $handler.UsageHeldRelease}

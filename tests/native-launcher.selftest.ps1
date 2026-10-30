@@ -183,6 +183,8 @@ function Send-LauncherReveal {
 }
 Assert ((Get-Command Enter-LauncherSingleInstance -ErrorAction SilentlyContinue) -ne $null) 'Launcher lost its single-instance guard.'
 Assert ($script:LauncherMutexName -notmatch '\\') 'Single-instance mutex must use the session namespace so it is visible across launches.'
+# Keep the production singleton isolated when the real widget is already running.
+$script:LauncherMutexName = 'CodexCompanionFixture-' + [Guid]::NewGuid().ToString('N')
 $first = Enter-LauncherSingleInstance
 Assert ($first -eq $true -and $script:LauncherMutex -ne $null) 'First launcher did not take ownership.'
 # A second owner in this process would deadlock on the same mutex, so prove the

@@ -176,6 +176,51 @@ test('live API never falls back to history on missing or failed source', async (
   assert.equal(disconnected.usage, null);
 });
 
+test('live refresh forces both sources, protects mutation and preserves gateway provenance', async (t) => {
+  const id = '123e4567-e89b-12d3-a456-426614170001';
+  const now = new Date().toISOString();
+  let release, starts = 0;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const refreshes = [];
+  const liveTelemetry = {
+    ensureStarted() { starts++; },
+    async refresh(options) { refreshes.push(options); await gate; },
+    snapshot({ taskId }) {
+      return {
+        state: 'available', source: 'magpie_gateway', reason: null, sampledAt: now, observedAt: now,
+        session: { id }, usage: { scope: 'conversation', includesSubagents: false, inputTokens: 500, outputTokens: 70, totalTokens: 570, cachedInputTokens: 350 },
+        model: null, reasoningEffort: null, lifecycle: null, speed: null,
+        gateway: { state: 'available', observedAt: now, matchedRequests: 4, countedRequests: 3, private: 'hidden' },
+      };
+    },
+    async stop() {},
+  };
+  const base = await startApp(t, { liveTelemetry });
+  const post = (body = '{}', headers = postHeaders()) => request(base, '/api/live/refresh', { method: 'POST', headers, body });
+  const first = post();
+  for (let attempt = 0; refreshes.length === 0 && attempt < 100; attempt++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(refreshes.length, 1);
+  const second = post(JSON.stringify({ taskId: id }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(refreshes.length, 1);
+  release();
+  for (const response of await Promise.all([first, second])) {
+    assert.equal(response.status, 200);
+    const value = await response.json();
+    assert.equal(value.source, 'magpie_gateway');
+    assert.equal(value.usage.inputTokens, 500);
+    assert.deepEqual(value.gateway, { state: 'available', observedAt: now, matchedRequests: 4, countedRequests: 3 });
+    assert.equal(JSON.stringify(value).includes('hidden'), false);
+  }
+  assert.deepEqual(refreshes, [{ taskId: null }]);
+  assert.equal(starts, 2, 'both coalesced requests must still initialize the live source');
+  assert.equal((await post('{"taskId":"not-a-uuid"}')).status, 400);
+  assert.equal((await post('{}', postHeaders({ 'X-Codex-Companion-Nonce': 'wrong' }))).status, 403);
+  const wrongMethod = await request(base, '/api/live/refresh');
+  assert.equal(wrongMethod.status, 405);
+  assert.equal(wrongMethod.headers.get('allow'), 'POST');
+});
+
 test('preview HTTP binds instance before lookup and uses bounded non-leaking envelopes', async t => {
   const runId = randomUUID(); let calls = 0, failure = null, answer = '<html/>', extra = false;
   const benchmark = { close: async () => {}, preview: async id => {
@@ -726,8 +771,9 @@ function stubUsageSummary({ timeline } = {}) {
     ...(task === null ? {} : { taskId: task }),
   });
   const summary = {
-    taskId, selectedTaskId, calls: [], starts: 0, stops: 0,
+    taskId, selectedTaskId, calls: [], refreshes: [], starts: 0, stops: 0,
     ensureStarted() { this.starts++; },
+    async runOnce(options) { this.refreshes.push(options); },
     stop: async () => { summary.stops++; },
     snapshot({ taskId: selected = null } = {}) {
       this.calls.push(selected);
@@ -929,6 +975,42 @@ test('HTTP usage publishes an allowlisted snapshot and isolates task-not-found f
   assert.equal(post.headers.get('allow'), 'GET');
   assert.equal(usageSummary.starts, 1);
   assert.deepEqual(usageSummary.calls, [null, usageSummary.taskId, usageSummary.selectedTaskId]);
+});
+
+test('HTTP usage refresh acknowledges immediately and coalesces full background scans', async (t) => {
+  const usageSummary = stubUsageSummary();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  usageSummary.runOnce = async (options) => { usageSummary.refreshes.push(options); await gate; };
+  const base = await startApp(t, { usageSummary });
+  const refresh = () => request(base, '/api/usage/refresh', { method: 'POST', headers: postHeaders(), body: '{}' });
+
+  const first = await refresh();
+  assert.equal(first.status, 202);
+  assert.equal(first.headers.get('cache-control'), 'no-store');
+  assert.equal((await first.json()).overall.scope, 'local_all');
+  assert.deepEqual(usageSummary.refreshes, [{ discover: true }]);
+  assert.equal(usageSummary.starts, 1, 'a refresh-first client must start automatic scanning');
+  const duplicate = await refresh();
+  assert.equal(duplicate.status, 202);
+  assert.equal(usageSummary.refreshes.length, 1);
+  const read = await request(base, '/api/usage');
+  assert.equal(read.status, 200);
+  assert.equal(usageSummary.starts, 1);
+  assert.equal(usageSummary.refreshes.length, 1, 'GET must not wait for or enqueue a full scan');
+
+  const malformed = await request(base, '/api/usage/refresh', { method: 'POST', headers: postHeaders(), body: '{"force":true}' });
+  assert.equal(malformed.status, 400);
+  assert.equal((await malformed.json()).error.code, 'schema_invalid');
+  const unauthenticated = await request(base, '/api/usage/refresh', { method: 'POST', headers: postHeaders({ 'X-Codex-Companion-Nonce': 'wrong' }), body: '{}' });
+  assert.equal(unauthenticated.status, 403);
+  assert.equal(usageSummary.refreshes.length, 1);
+
+  release();
+  await new Promise((resolve) => setImmediate(resolve));
+  const next = await refresh();
+  assert.equal(next.status, 202);
+  assert.equal(usageSummary.refreshes.length, 2);
 });
 
 test('HTTP usage allowlists the optional UTC timeline at every layer and excludes it from selected tasks', async (t) => {

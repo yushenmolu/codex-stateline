@@ -26,7 +26,9 @@ function setup(options = {}) {
     live, emit, thread, turn, usage,
     connect: () => hooks.status({ connected: true, source: 'codex_app_server' }),
     disconnect: () => hooks.status({ connected: false, source: 'codex_app_server', reason: 'source_disconnected' }),
+    status: (reason) => hooks.status({ connected: false, source: 'codex_app_server', reason }),
     advance(ms) { now += ms; mono += ms; },
+    adjustWall(ms) { now += ms; },
     get counts() { return { starts, stops }; },
   };
 }
@@ -392,4 +394,164 @@ test('observed speed projection rejects inconsistent, stale and unrelated values
     assert.equal(result.speed, null, JSON.stringify(change));
     assert.equal(result.usage.totalTokens, 120);
   }
+});
+
+test('live reconciles the exact conversation with Magpie and refreshes both sources', async () => {
+  const calls = { starts: 0, refreshes: [], stops: 0, snapshots: [] };
+  let gateway = {
+    state: 'available', reason: null, observedAt: new Date(NOW + 1000).toISOString(),
+    matchedRequests: 4, countedRequests: 3,
+    usage: { inputTokens: 500, outputTokens: 70, totalTokens: 570, cachedInputTokens: 350, reasoningOutputTokens: 30 },
+  };
+  const usageSource = {
+    start() { calls.starts++; },
+    async refresh(options) { calls.refreshes.push(options); },
+    snapshot(options) { calls.snapshots.push(options); return gateway; },
+    async stop() { calls.stops++; },
+  };
+  const s = setup({ usageSource });
+  s.connect(); s.thread(); s.turn(); s.usage({ ...USAGE, last: { inputTokens: 80, outputTokens: 10, totalTokens: 90, cachedInputTokens: 60 } });
+  const snapshot = s.live.snapshot();
+  assert.equal(snapshot.source, 'magpie_gateway');
+  assert.equal(snapshot.observedAt, gateway.observedAt);
+  assert.deepEqual(snapshot.usage, {
+    scope: 'conversation', includesSubagents: false,
+    inputTokens: 500, outputTokens: 70, totalTokens: 570, cachedInputTokens: 350, reasoningOutputTokens: 30,
+    last: { inputTokens: 80, outputTokens: 10, totalTokens: 90, cachedInputTokens: 60 },
+  });
+  assert.deepEqual(snapshot.gateway, { state: 'available', observedAt: gateway.observedAt, matchedRequests: 4, countedRequests: 3 });
+  assert.deepEqual(calls.snapshots, [{ taskId: THREAD }]);
+  await s.live.refresh({ taskId: THREAD });
+  assert.deepEqual(calls.refreshes, [{ force: true }]);
+  gateway = { ...gateway, state: 'unavailable', usage: null };
+  assert.equal(s.live.snapshot().source, 'codex_app_server');
+  assert.equal(s.live.snapshot().usage.totalTokens, 120);
+  await s.live.stop();
+  assert.equal(calls.starts, 1);
+  assert.equal(calls.stops, 1);
+});
+
+test('Magpie speed uses fresh local observations instead of stale log timestamps', () => {
+  let gateway = {
+    state: 'available', reason: null, observedAt: new Date(NOW + 1000).toISOString(),
+    matchedRequests: 4, countedRequests: 4,
+    usage: { inputTokens: 500, outputTokens: 70, totalTokens: 570, cachedInputTokens: 350 },
+  };
+  const s = setup({ usageSource: { start() {}, snapshot: () => gateway } });
+  s.connect(); s.thread(); s.turn(); s.usage();
+  assert.equal(s.live.snapshot().speed, null);
+  s.advance(2_000);
+  // The log timestamp deliberately stays behind. TPS must still advance from
+  // the new output total and the local two-second observation interval.
+  gateway = { ...gateway, matchedRequests: 5, countedRequests: 5,
+    usage: { inputTokens: 500, outputTokens: 170, totalTokens: 670, cachedInputTokens: 350 } };
+  const snapshot = s.live.snapshot();
+  assert.equal(snapshot.observedAt, gateway.observedAt);
+  assert.deepEqual(snapshot.speed, {
+    source: 'observed_window', outputTokensPerSecond: 50, outputTokens: 100, elapsedSeconds: 2,
+    startedAt: new Date(NOW).toISOString(), observedAt: new Date(NOW + 2_000).toISOString(), includesToolsAndWait: true,
+  });
+});
+
+test('live retains the verified Magpie conversation briefly across Codex disconnects', () => {
+  let gateway = {
+    state: 'available', reason: null, observedAt: new Date(NOW + 1000).toISOString(),
+    matchedRequests: 4, countedRequests: 4,
+    usage: { inputTokens: 500, outputTokens: 70, totalTokens: 570, cachedInputTokens: 350 },
+  };
+  const s = setup({ usageSource: { start() {}, snapshot: () => gateway } });
+  s.connect(); s.thread(); s.turn(); s.usage({ ...USAGE, last: { inputTokens: 80, outputTokens: 10, totalTokens: 90 } });
+  assert.equal(s.live.snapshot().source, 'magpie_gateway');
+  s.disconnect();
+  gateway = { ...gateway, observedAt: new Date(NOW + 2000).toISOString(), matchedRequests: 5, countedRequests: 5,
+    usage: { inputTokens: 600, outputTokens: 80, totalTokens: 680, cachedInputTokens: 400 } };
+  const retained = s.live.snapshot();
+  assert.equal(retained.state, 'available');
+  assert.equal(retained.source, 'magpie_gateway');
+  assert.equal(retained.reason, 'source_disconnected');
+  assert.equal(retained.session.id, THREAD);
+  assert.equal(retained.usage.totalTokens, 680);
+  assert.equal(retained.usage.cachedInputTokens, 400);
+  assert.deepEqual(retained.usage.last, { inputTokens: 80, outputTokens: 10, totalTokens: 90 });
+  assert.equal(retained.lifecycle, null);
+  assert.equal(retained.speed, null);
+  assert.equal(retained.gateway.matchedRequests, 5);
+  assert.equal(s.live.snapshot({ taskId: OTHER }).session, null);
+  s.advance(300_001);
+  assert.equal(s.live.snapshot().state, 'disconnected');
+  assert.equal(s.live.snapshot().usage, null);
+});
+
+test('gateway-confirmed counters do not depend on Codex already reporting its own counters', () => {
+  for (const state of ['available', 'partial']) {
+    const gateway = { state, observedAt: new Date(NOW).toISOString(), matchedRequests: 2, countedRequests: 1, usage: USAGE };
+    const s = setup({ usageSource: { snapshot: () => gateway } });
+    s.connect();
+    s.emit({ type: 'conversation', threadId: THREAD, primary: true, state: 'active', usage: null });
+    const value = s.live.snapshot();
+    assert.equal(value.state, 'available', state);
+    assert.equal(value.reason, null);
+    assert.equal(value.source, 'magpie_gateway');
+    assert.deepEqual(value.usage, { scope: 'conversation', includesSubagents: false, ...USAGE });
+  }
+});
+
+test('gateway totals never inherit optional counters from a different source or hide valid Codex data', () => {
+  let gateway = { state: 'available', observedAt: new Date(NOW).toISOString(), matchedRequests: 1, countedRequests: 1, usage: USAGE };
+  const s = setup({ usageSource: { snapshot: () => gateway } });
+  s.connect(); s.thread(); s.turn(); s.usage({ ...USAGE, cachedInputTokens: 80, reasoningOutputTokens: 15 });
+  assert.deepEqual(s.live.snapshot().usage, { scope: 'conversation', includesSubagents: false, ...USAGE });
+  gateway = { ...gateway, observedAt: new Date(NOW + 5_001).toISOString() };
+  const fallback = s.live.snapshot();
+  assert.equal(fallback.state, 'available');
+  assert.equal(fallback.source, 'codex_app_server');
+  assert.equal(fallback.usage.cachedInputTokens, 80);
+});
+
+test('retained gateway identity is revoked by removal, changed selection, ambiguity, or untrusted source state', () => {
+  for (const mode of ['removed', 'new-active', 'new-idle', 'subagent', 'unknown-ancestry', 'different-pin',
+    'connecting', 'identity_unverified', 'source_invalid', 'capacity_exceeded']) {
+    const gateway = { state: 'available', observedAt: new Date(NOW).toISOString(), matchedRequests: 1, countedRequests: 1, usage: USAGE };
+    const s = setup({ usageSource: { snapshot: () => gateway } });
+    s.connect();
+    s.emit({ type: 'conversation', threadId: THREAD, primary: true, state: mode === 'new-idle' ? 'idle' : 'active', usage: USAGE });
+    assert.equal(s.live.snapshot().session.id, THREAD, mode);
+    if (mode === 'removed') s.emit({ type: 'removed', threadId: THREAD });
+    else if (mode === 'new-active' || mode === 'new-idle') {
+      s.advance(1);
+      s.emit({ type: 'conversation', threadId: OTHER, primary: true, state: mode === 'new-idle' ? 'idle' : 'active', usage: USAGE });
+    } else if (mode === 'subagent' || mode === 'unknown-ancestry') {
+      s.emit({ type: 'conversation', threadId: THREAD, primary: mode === 'subagent' ? false : null, state: 'active', usage: USAGE });
+    } else if (mode === 'different-pin') s.live.snapshot({ taskId: OTHER });
+    else s.status(mode);
+    s.disconnect();
+    assert.equal(s.live.snapshot().usage, null, mode);
+  }
+});
+
+test('empty reconnect handshakes and wall-clock changes cannot extend retained identity indefinitely', () => {
+  for (const mode of ['empty-handshake', 'wall-clock-backward']) {
+    const gateway = { state: 'available', observedAt: new Date(NOW).toISOString(), matchedRequests: 1, countedRequests: 1, usage: USAGE };
+    const s = setup({ usageSource: { snapshot: () => gateway } });
+    s.connect(); s.thread(); s.turn(); s.usage(); s.live.snapshot(); s.disconnect();
+    s.advance(290_000);
+    if (mode === 'empty-handshake') { s.connect(); s.disconnect(); }
+    else s.adjustWall(-280_000);
+    s.advance(10_001);
+    assert.equal(s.live.snapshot().usage, null, mode);
+  }
+});
+
+test('a disconnected gateway cannot manufacture a live speed or carry an old baseline into recovery', () => {
+  let gateway = { state: 'available', observedAt: new Date(NOW).toISOString(), matchedRequests: 1, countedRequests: 1, usage: USAGE };
+  const s = setup({ usageSource: { snapshot: () => gateway } });
+  s.connect(); s.thread(); s.turn(); s.usage(); s.live.snapshot();
+  s.advance(2_000);
+  gateway = { ...gateway, usage: { inputTokens: 100, outputTokens: 40, totalTokens: 140 } };
+  assert.ok(s.live.snapshot().speed);
+  s.disconnect(); s.advance(2_000);
+  gateway = { ...gateway, usage: { inputTokens: 100, outputTokens: 60, totalTokens: 160 } };
+  assert.equal(s.live.snapshot().speed, null);
+  s.connect(); s.thread(); s.turn(); s.usage();
+  assert.equal(s.live.snapshot().speed, null);
 });

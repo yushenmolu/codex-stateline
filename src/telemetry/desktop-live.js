@@ -143,11 +143,14 @@ export function createDesktopLiveConnector({
     // the same ceiling as the candidate list and the oldest announcement is the one
     // to go: a conversation announced long ago is the least likely to still be the
     // one being watched.
-    const discovered = new Set();
-    function remember(id) {
-      if (discovered.has(id)) return;
-      discovered.add(id);
-      while (discovered.size > maxCandidates) discovered.delete(discovered.values().next().value);
+    const discovered = new Map();
+    function remember(id, announced = false) {
+      if (discovered.has(id)) {
+        if (announced) discovered.set(id, true);
+        return;
+      }
+      discovered.set(id, announced);
+      while (discovered.size > maxCandidates) discovered.delete(discovered.keys().next().value);
     }
 
     function send(message) {
@@ -203,17 +206,20 @@ export function createDesktopLiveConnector({
       requests.set(requestId, { method, threadId, deadline: now() + 5_000 });
       send({ type: 'request', requestId, sourceClientId: clientId ?? 'initializing-client', version, method, params, timeoutMs: 5_000 });
     }
-    function candidate(id, interestedBy = null) {
+    function candidate(id, interestedBy = null, replayed = false) {
       if (!UUID.test(id ?? '')) return;
       let entry = candidates.get(id);
       if (!entry) {
         if (candidates.size >= maxCandidates) { disconnect('capacity_exceeded'); return; }
         if (ready) { ready = false; status({ connected: false, source: SOURCE, reason: 'connecting' }); }
-        entry = { id, owner: null, subscribed: false, interests: new Set(), revision: null, state: null, retained: false, resyncing: false, deadline: now() + 5_000 };
+        entry = { id, owner: null, subscribed: false, interests: new Set(), revision: null, state: null, retained: false, resyncing: false, replayed, deadline: now() + 5_000 };
         candidates.set(id, entry);
         request('thread-owner-discovery', { hostId: 'local', conversationId: id }, 1, id);
       }
-      if (interestedBy && entry.interests.size < 32) entry.interests.add(interestedBy);
+      if (interestedBy) {
+        entry.replayed = false;
+        if (entry.interests.size < 32) entry.interests.add(interestedBy);
+      }
     }
     function publish(entry) {
       const value = entry.state;
@@ -247,11 +253,17 @@ export function createDesktopLiveConnector({
         requests.delete(message.requestId);
         if (message.method !== pending.method || message.resultType !== 'success') {
           if (pending.method === 'initialize') disconnect('source_unavailable');
-          // A failed discovery is not proof the conversation is gone: the peer can be
-          // busy, or the user can switch threads mid-handshake. Forgetting the id here
-          // once left the reader permanently blank, so it stays remembered and is asked
-          // for again after the next reconnect. The memo ceiling bounds that cost.
-          else disconnect('identity_unverified');
+          else {
+            // An old announcement can outlive its owner. Retire only a replayed,
+            // unpinned id explicitly reported ownerless, then recheck every other
+            // candidate on a new connection before publishing anything.
+            if (pending.method === 'thread-owner-discovery' && pending.threadId !== selected
+              && candidates.get(pending.threadId)?.replayed && message.resultType === 'error'
+              && message.error === 'no-client-found' && (message.method === undefined || message.method === pending.method)) {
+              forget(pending.threadId);
+            }
+            disconnect('identity_unverified');
+          }
           return;
         }
         if (pending.method === 'initialize') {
@@ -261,7 +273,7 @@ export function createDesktopLiveConnector({
           // A pinned task survives in `candidates`, a discovered one survives only in
           // `discovered` because the announced disconnect cleared the candidates. Both
           // need the peer asked again: the socket took every subscription with it.
-          for (const id of discovered) if (!candidates.has(id)) candidate(id);
+          for (const id of discovered.keys()) if (!candidates.has(id) && selected === null) candidate(id, null, true);
           // After a planned refresh the pins survive but the subscriptions did not,
           // so every retained owner is asked again for the stream.
           for (const entry of candidates.values()) if (entry.owner) follow(entry, true);
@@ -284,7 +296,7 @@ export function createDesktopLiveConnector({
       if (!object(params) || params.hostId !== 'local' || !UUID.test(params.conversationId ?? '')) return;
       if (message.method === 'thread-stream-following-changed' && message.version === 1 && message.sourceClientId !== clientId) {
         if (selected !== null) return;
-        if (params.following === true) { remember(params.conversationId); candidate(params.conversationId, message.sourceClientId); }
+        if (params.following === true) { remember(params.conversationId, true); candidate(params.conversationId, message.sourceClientId); }
         else if (params.following === false) {
           const entry = candidates.get(params.conversationId);
           entry?.interests.delete(message.sourceClientId);
@@ -306,6 +318,9 @@ export function createDesktopLiveConnector({
         const value = change.conversationState;
         if (!object(value) || value.id !== entry.id) return disconnect('identity_unverified');
         entry.state = project(value); entry.revision = change.revision; entry.resyncing = false; entry.retained = false;
+        // A verified pin must remain discoverable after returning to follow mode,
+        // even if the peer never announced that conversation on this socket.
+        remember(entry.id);
         publish(entry);
       } else if (change.type === 'patches') {
         if (entry.revision !== null && change.revision <= entry.revision) return;
@@ -403,6 +418,7 @@ export function createDesktopLiveConnector({
       select(taskId) {
         if (stopped || (taskId !== null && !UUID.test(taskId ?? ''))) return;
         lastRead = now();
+        const unpinning = selected !== null && taskId === null;
         // Follow mode is a reader that watches whatever the peer announces, not a
         // reader that watches nothing, so unpinning tears nothing down: the card polls
         // /api/live without a task id whenever nothing is pinned, and releasing the
@@ -412,9 +428,31 @@ export function createDesktopLiveConnector({
         // because that conversation is genuinely no longer the one being described.
         // Pinning, unpinning and re-pinning the same task all keep the candidates:
         // dropping them re-armed the handshake and blanked the card on every poll.
-        if (selected !== null && taskId !== null && selected !== taskId) for (const entry of [...candidates.values()]) remove(entry);
+        if (taskId !== null && selected !== taskId) {
+          for (const entry of [...candidates.values()]) if (entry.id !== taskId) {
+            remove(entry);
+            if (discovered.get(entry.id) !== true) forget(entry.id);
+          }
+          for (const [id, announced] of discovered) if (!announced && id !== taskId) {
+            forget(id);
+          }
+          if (selected !== null) for (const entry of [...candidates.values()]) remove(entry);
+        }
         selected = taskId;
         if (clientId && selected !== null) candidate(selected);
+        // Pinning releases unrelated subscriptions, but their UI announcements
+        // happen only once. Restore them through identity and snapshot verification.
+        if (clientId && unpinning) for (const [id, announced] of discovered) {
+          if (announced && !candidates.has(id)) candidate(id, null, true);
+        }
+        if (!socket && now() >= retryAt) open();
+      },
+      refresh() {
+        if (stopped) return;
+        lastRead = now();
+        // Keep the verified candidates, but force a fresh IPC snapshot. Heartbeats
+        // only prove contact; they do not refresh the conversation counters.
+        if (socket) disconnect('source_disconnected', { announce: false });
         if (!socket && now() >= retryAt) open();
       },
       stop() { if (stopped) return; stopped = true; clearInterval(timer); disconnect(); },

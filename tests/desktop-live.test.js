@@ -775,6 +775,64 @@ test('a failed owner discovery keeps the conversation remembered for the next re
   assert.equal(s.live.snapshot().usage.inputTokens, 300);
 });
 
+test('an ownerless remembered conversation cannot poison every subsequent reconnect', (t) => {
+  for (const includeMethod of [false, true]) {
+    const s = setup(t, { leaseMs: 60_000, reconnectMs: 10 }, { telemetry: true });
+    s.ready();
+    s.interest(THREAD); s.interest(OTHER);
+    s.owner(THREAD); s.owner(OTHER);
+    s.snapshot(1); s.snapshot(1, { threadRuntimeStatus: { type: 'idle' } }, { id: OTHER });
+    assert.equal(s.live.snapshot().session.id, THREAD);
+
+    s.peer.receive({ type: 'broadcast', method: 'ipc-connection-reset', params: {}, sourceClientId: OWNER });
+    s.advance(20); s.flush(); s.peer.emit('connect');
+    s.reply(s.request('initialize'), { clientId: CLIENT });
+    s.owner(THREAD); s.snapshot(2);
+    const obsolete = s.request('thread-owner-discovery', OTHER);
+    s.peer.receive({ type: 'response', requestId: obsolete.requestId, resultType: 'error', error: 'no-client-found',
+      ...(includeMethod ? { method: 'thread-owner-discovery' } : {}) });
+    s.flush();
+    assert.equal(s.peer.destroyed, true);
+    assert.equal(s.live.snapshot().state, 'disconnected', 'a failed discovery never promotes another candidate');
+
+    s.advance(20); s.flush(); s.peer.emit('connect');
+    s.reply(s.request('initialize'), { clientId: CLIENT });
+    assert.equal(s.request('thread-owner-discovery', OTHER), undefined, 'the explicitly ownerless memo is retired');
+    assert.ok(s.request('thread-owner-discovery', THREAD), 'healthy candidates still get a fresh identity check');
+    s.owner(THREAD); s.snapshot(3);
+    assert.equal(s.live.snapshot().state, 'available');
+    assert.equal(s.live.snapshot().session.id, THREAD);
+
+    s.interest(OTHER);
+    assert.ok(s.request('thread-owner-discovery', OTHER), 'a new announcement can rediscover a retired conversation');
+    assert.equal(s.live.snapshot().state, 'disconnected', 'renewed ambiguity still gates the whole source');
+  }
+});
+
+test('fresh and pinned owner discoveries are not retired on a no-client-found error', (t) => {
+  for (const pinned of [false, true]) {
+    const s = setup(t, { leaseMs: 60_000, reconnectMs: 10 }, { telemetry: true });
+    s.ready(pinned ? THREAD : null);
+    if (!pinned) s.interest(THREAD);
+    const initial = s.request('thread-owner-discovery', THREAD);
+    s.peer.receive({ type: 'response', requestId: initial.requestId, resultType: 'error', error: 'no-client-found' });
+    assert.equal(s.peer.destroyed, true);
+
+    s.advance(20); s.flush(); s.peer.emit('connect');
+    s.reply(s.request('initialize'), { clientId: CLIENT });
+    const retried = s.request('thread-owner-discovery', THREAD);
+    assert.ok(retried, 'a first discovery failure must still be retried');
+    if (pinned) {
+      s.peer.receive({ type: 'response', requestId: retried.requestId, resultType: 'error', error: 'no-client-found' });
+      s.advance(20); s.flush(); s.peer.emit('connect');
+      s.reply(s.request('initialize'), { clientId: CLIENT });
+      assert.ok(s.request('thread-owner-discovery', THREAD), 'the selected task remains selected across repeated failures');
+    }
+    s.owner(THREAD); s.snapshot();
+    assert.equal(s.live.snapshot({ taskId: pinned ? THREAD : null }).state, 'available');
+  }
+});
+
 // Remembering what the peer announced is what lets an unpinned reader come back, but
 // the memo must not grow with the user's whole history: it would cost one discovery
 // per past conversation on every reconnect.
@@ -871,5 +929,139 @@ test('polling without a pinned task keeps the connection that a pinned poll open
   assert.equal(s.sockets.length, 1);
   assert.equal(s.peer, opened);
   assert.equal(s.follows(THREAD).length, 1);
+});
+
+test('an unpinned verified target survives reconnect even without a UI announcement', (t) => {
+  for (const unpinBeforeSnapshot of [false, true]) {
+    const s = setup(t, { leaseMs: 60_000, reconnectMs: 10 }, { telemetry: true });
+    s.ready(THREAD); s.owner();
+    if (unpinBeforeSnapshot) s.live.snapshot();
+    s.snapshot();
+    assert.equal(s.live.snapshot().state, 'available');
+
+    s.peer.receive({ type: 'broadcast', method: 'ipc-connection-reset', params: {}, sourceClientId: OWNER });
+    s.advance(20); s.flush(); s.peer.emit('connect');
+    s.reply(s.request('initialize'), { clientId: CLIENT });
+    assert.ok(s.request('thread-owner-discovery', THREAD), 'a verified target remains discoverable after unpinning');
+    s.owner(); s.snapshot(2);
+    assert.equal(s.live.snapshot().session.id, THREAD);
+  }
+});
+
+test('unpinning restores announced candidates on the same socket after rechecking their identity', (t) => {
+  for (const pinnedState of ['idle', 'active']) {
+    const s = setup(t, { leaseMs: 60_000 }, { telemetry: true });
+    s.ready(); s.interest(THREAD); s.owner(); s.snapshot();
+    assert.equal(s.live.snapshot().session.id, THREAD);
+    const previousDiscovery = s.request('thread-owner-discovery', THREAD);
+    const opened = s.peer;
+
+    s.live.snapshot({ taskId: OTHER });
+    assert.equal(s.follows(THREAD).at(-1).params.following, false);
+    s.owner(OTHER); s.snapshot(1, { threadRuntimeStatus: { type: pinnedState } }, { id: OTHER });
+    assert.equal(s.live.snapshot({ taskId: OTHER }).session.id, OTHER);
+
+    const published = s.conversations.length;
+    const pending = s.live.snapshot();
+    const restoredDiscovery = s.request('thread-owner-discovery', THREAD);
+    assert.notEqual(restoredDiscovery.requestId, previousDiscovery.requestId, 'unpinning rediscovers the one-shot announcement');
+    assert.equal(pending.state, 'disconnected');
+    assert.equal(pending.reason, 'connecting');
+    assert.equal(pending.session, null);
+    assert.equal(pending.usage, null);
+    s.snapshot(2);
+    assert.equal(s.conversations.length, published, 'a snapshot before owner verification is ignored');
+    assert.equal(s.live.snapshot().state, 'disconnected');
+    s.owner();
+    assert.equal(s.live.snapshot().state, 'disconnected', 'owner verification still needs a fresh snapshot');
+    s.snapshot(2);
+
+    const restored = s.live.snapshot();
+    if (pinnedState === 'idle') {
+      assert.equal(restored.state, 'available');
+      assert.equal(restored.session.id, THREAD, 'the active announcement outranks the idle former pin');
+    } else {
+      assert.equal(restored.state, 'ambiguous');
+      assert.equal(restored.reason, 'multiple_active_threads');
+      assert.equal(restored.session, null);
+      assert.equal(restored.usage, null);
+    }
+    assert.deepEqual(s.conversations.slice(published).map((event) => event.threadId), [OTHER, THREAD]);
+    assert.equal(s.sockets.length, 1);
+    assert.equal(s.peer, opened);
+    assert.equal(opened.destroyed, false);
+    s.connector.stop();
+  }
+});
+
+test('switching pins retires a pin-only memo and replays only the selected conversation', (t) => {
+  const s = setup(t, { leaseMs: 60_000, reconnectMs: 10 }, { telemetry: true });
+  s.subscribe(THREAD);
+  s.live.snapshot({ taskId: OTHER });
+  s.owner(OTHER); s.snapshot(1, {}, { id: OTHER });
+
+  s.peer.receive({ type: 'broadcast', method: 'ipc-connection-reset', params: {}, sourceClientId: OWNER });
+  s.advance(20); s.flush(); s.peer.emit('connect');
+  s.reply(s.request('initialize'), { clientId: CLIENT });
+  assert.equal(s.request('thread-owner-discovery', THREAD), undefined, 'the replaced pin must not return');
+  s.owner(OTHER); s.snapshot(2, {}, { id: OTHER });
+  assert.equal(s.live.snapshot({ taskId: OTHER }).session.id, OTHER);
+
+  s.live.snapshot();
+  s.peer.receive({ type: 'broadcast', method: 'ipc-connection-reset', params: {}, sourceClientId: OWNER });
+  s.advance(20); s.flush(); s.peer.emit('connect');
+  s.reply(s.request('initialize'), { clientId: CLIENT });
+  assert.equal(s.request('thread-owner-discovery', THREAD), undefined, 'unpinning cannot revive a replaced pin');
+  s.owner(OTHER); s.snapshot(3, {}, { id: OTHER });
+  assert.equal(s.live.snapshot().session.id, OTHER);
+});
+
+test('replacing an unpinned pending target cancels its subscription before a late snapshot', (t) => {
+  for (const ownerKnown of [false, true]) {
+    const s = setup(t, { leaseMs: 60_000, reconnectMs: 10 }, { telemetry: true });
+    s.ready(THREAD);
+    const previous = s.request('thread-owner-discovery', THREAD);
+    if (ownerKnown) s.owner(THREAD);
+    s.live.snapshot();
+    s.live.snapshot({ taskId: OTHER });
+    if (ownerKnown) {
+      assert.equal(s.follows(THREAD).at(-1).params.following, false, 'a replaced pending subscription is released');
+      s.snapshot(1);
+    } else s.reply(previous, { supportsUntrustedAppInput: true });
+    s.owner(OTHER); s.snapshot(1, {}, { id: OTHER });
+    assert.equal(s.live.snapshot({ taskId: OTHER }).state, 'available');
+
+    s.peer.receive({ type: 'broadcast', method: 'ipc-connection-reset', params: {}, sourceClientId: OWNER });
+    s.advance(20); s.flush(); s.peer.emit('connect');
+    s.reply(s.request('initialize'), { clientId: CLIENT });
+    assert.equal(s.request('thread-owner-discovery', THREAD), undefined, 'a late response cannot revive the replaced target');
+    s.owner(OTHER); s.snapshot(2, {}, { id: OTHER });
+    assert.equal(s.live.snapshot({ taskId: OTHER }).session.id, OTHER);
+  }
+});
+
+test('an exact pin does not depend on old follow-mode conversations during reconnect or refresh', (t) => {
+  for (const mode of ['disconnect', 'refresh']) {
+    const s = setup(t, { leaseMs: 60_000, reconnectMs: 10 }, { telemetry: true });
+    s.ready(); s.interest(THREAD); s.owner(); s.snapshot();
+    assert.equal(s.live.snapshot().session.id, THREAD);
+    s.live.snapshot({ taskId: OTHER }); s.owner(OTHER); s.snapshot(1, {}, { id: OTHER });
+    assert.equal(s.live.snapshot({ taskId: OTHER }).session.id, OTHER);
+    assert.equal(s.follows(THREAD).at(-1).params.following, false, 'an exact pin releases unrelated subscriptions');
+
+    if (mode === 'refresh') s.connector.refresh();
+    else s.peer.receive({ type: 'broadcast', method: 'ipc-connection-reset', params: {}, sourceClientId: OWNER });
+    s.advance(20); s.flush(); s.peer.emit('connect');
+    s.reply(s.request('initialize'), { clientId: CLIENT });
+    assert.equal(s.request('thread-owner-discovery', THREAD), undefined, 'an old follow-mode owner cannot block the exact pin');
+    assert.equal(s.follows(THREAD).length, 0);
+    if (s.request('thread-owner-discovery', OTHER)) s.owner(OTHER);
+    s.snapshot(2, {}, { id: OTHER });
+    s.advance(5_001); s.flush();
+    const value = s.live.snapshot({ taskId: OTHER });
+    assert.equal(value.state, 'available', mode);
+    assert.equal(value.session.id, OTHER);
+    assert.equal(s.peer.destroyed, false);
+  }
 });
 
