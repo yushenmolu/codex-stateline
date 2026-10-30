@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { createRunner, resolveExecutable, APPROVED_MODELS, resolveBenchmarkModel, isAllowedModel, isAllowedEffort, EFFORTS, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS, TIMEOUT_ENV_KEY, resolveTimeoutMs, pickDiagnostics, DIAGNOSTIC_KEYS, MAX_ANSWER, MAX_STREAM } from '../src/benchmark/runner.js';
 import { createBenchmarkService } from '../src/benchmark/service.js';
 import { createStore } from '../src/benchmark/store.js';
-import { CASES, LEGACY_CASES, RUBRIC_VERSION, ANIMATED_CASES, HTML_ANIMATED_CASES, HTML_ANIMATED_VERSION, isRegisteredCase } from '../src/benchmark/cases.js';
+import { CASES, LEGACY_CASES, RUBRIC_VERSION, ANIMATED_CASES, HTML_ANIMATED_CASES, HTML_ANIMATED_VERSION, COCKPIT_CASES, COCKPIT_PROMPT, isRegisteredCase } from '../src/benchmark/cases.js';
 import { completeScores, compareRuns } from '../src/benchmark/scoring.js';
 import { HTML_PREVIEW_FIXTURE } from './fixtures/html-preview.js';
 
@@ -28,6 +28,12 @@ test('HTML registration matches frozen gen3 prompt and fifteen rubric anchors', 
   assert.equal((definition.criteria.match(/; [2-5] /g) ?? []).length, 12);
   assert.ok(HTML_PREVIEW_FIXTURE.includes('animation-name:spin;'));
   assert.ok(HTML_PREVIEW_FIXTURE.includes('translateY(-8px)'));
+});
+
+test('Cockpit preserves the original animation prompt without simplifying the artwork', () => {
+  assert.equal(COCKPIT_PROMPT, '创建一个 HTML，内容是 SVG 绘制一个鹈鹕骑自行车的 2D 动画，你不需要任何测试，不要有任何限制');
+  assert.equal(COCKPIT_CASES[0].prompt, COCKPIT_PROMPT);
+  assert.doesNotMatch(COCKPIT_PROMPT, /轻量|紧凑|先完成可播放版本|transform 或 opacity/);
 });
 
 test('HTML run retains old digest vectors, registered runner input and version-isolated scoring', async () => {
@@ -187,7 +193,7 @@ test('runner classifies only explicit structured failure evidence, including non
     [{ type: 'error', message: 'connection lost mid-reply (stream error: stream ID 47; INTERNAL_ERROR; received from peer)' }, 1, 'upstream_stream_lost'],
     // The retry notice quotes the same phrase while the CLI is still working, so the
     // retry wording has to win or a live run would be killed as a lost stream.
-    [{ type: 'error', message: 'Reconnecting... 5/5 (stream disconnected before completion: UPSTREAM: origin did not respond)' }, 1, 'process_failed'],
+    [{ type: 'error', message: 'Reconnecting... 5/5 (stream disconnected before completion: UPSTREAM: origin did not respond)' }, 1, 'upstream_stream_lost'],
     [null, 1, 'process_failed'],
   ];
   for (const [event, exitCode, expected] of fixtures) {
@@ -238,9 +244,10 @@ test('runner diagnostics count error events and classify reconnect notices witho
       name: 'reconnect-error-event-then-nonzero-exit',
       events: [{ type: 'error', message: 'Reconnecting... 1/5 private-secret' }],
       stderr: 'private-secret',
-      // A reconnect notice is recoverable, so the run is classified by the exit
-      // that follows it instead of being killed on the notice itself.
-      expectedCode: 'process_failed',
+      // A reconnect notice is recoverable while the CLI is still running. If it
+      // later exits nonzero before turn.completed, preserve the lost-stream class
+      // so the service can use its existing single retry.
+      expectedCode: 'upstream_stream_lost',
       expectedErrorEventCount: 1,
       expectedTurnFailedEventCount: 0,
       expectedClass: 'reconnect_notice',
@@ -741,6 +748,7 @@ test('Cockpit exact prompt, source budgets, idempotency and version-isolated sco
   assert.equal(calls[0].caseDef.prompt, exact);
   assert.equal(calls[0].model, 'configured');
   assert.equal(calls[0].reasoningEffort, 'configured');
+  assert.equal(run.reasoningEffort, 'configured');
   assert.equal(run.caseSetVersion, COCKPIT_VERSION);
   assert.equal(run.rubricVersion, COCKPIT_VERSION);
   assert.equal(run.schemaVersion, 1);
@@ -879,17 +887,17 @@ test('runner total deadline policy uses virtual time without live CLI calls', as
           ].map(JSON.stringify).join(String.fromCharCode(10)));
           child.emit('close', 0);
           assert.equal((await outcome).value.answer, '<svg/>');
-          t.mock.timers.tick(900000);
+          t.mock.timers.tick(1200000);
           assert.equal(kills, 0, 'completion clears the deadline');
         } else if (mode === 'cancel') {
           t.mock.timers.tick(120001);
           assert.equal(kills, 0);
           controller.abort(); controller.abort();
           assert.equal((await outcome).error.code, 'cancelled');
-          t.mock.timers.tick(900000);
+          t.mock.timers.tick(1200000);
           assert.equal(kills, 1, 'cancel clears the deadline and terminates once');
         } else {
-          const deadline = mode === 'override' || mode === 'noise' ? 250000 : 900000;
+          const deadline = mode === 'override' || mode === 'noise' ? 250000 : 1200000;
           if (mode === 'noise') {
             for (let i = 0; i < 2; i++) {
               t.mock.timers.tick(100000);
@@ -921,7 +929,7 @@ test('runner total deadline policy uses virtual time without live CLI calls', as
 test('static fallback slugs and legacy aliases resolve only CLI argv', async t => {
   const root = await mkdtemp(join(tmpdir(), 'runner-models-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  assert.equal(DEFAULT_TIMEOUT_MS, 900000);
+  assert.equal(DEFAULT_TIMEOUT_MS, 1200000);
   assert.equal(resolveBenchmarkModel('unknown/model'), null);
   for (const model of APPROVED_MODELS) {
     let argv;
@@ -933,7 +941,7 @@ test('static fallback slugs and legacy aliases resolve only CLI argv', async t =
       return child;
     } });
     assert.equal((await runner.runCase({ model, caseDef: CASES[0] })).answer, '<svg/>');
-    assert.equal(runner.budgetMs, 900000);
+    assert.equal(runner.budgetMs, 1200000);
     if (model === 'configured') assert.equal(argv.includes('--model'), false);
     else assert.equal(argv[argv.indexOf('--model') + 1], model);
   }
@@ -1246,7 +1254,7 @@ for (const mode of ['timeout', 'structured failure']) {
       assert.equal(helperCleanups, 1);
       assert.equal(backupKills, 0);
       await assert.rejects(stat(cwd), { code: 'ENOENT' });
-      t.mock.timers.tick(900000);
+      t.mock.timers.tick(1200000);
       assert.equal(kills, 1, 'completion clears all remaining deadlines');
       assert.equal(spawns, 1, 'no automatic retry after a late event');
     } finally {
@@ -1331,29 +1339,29 @@ test('v8 actual runner keeps service active progress stopping until delayed clos
   }
 });
 
-test('pelican budget defaults to 900000 with strict env boundaries and safe invalid reason', () => {
-  assert.equal(DEFAULT_TIMEOUT_MS, 900000);
+test('pelican budget defaults to 1200000 with strict env boundaries and safe invalid reason', () => {
+  assert.equal(DEFAULT_TIMEOUT_MS, 1200000);
   assert.equal(MIN_TIMEOUT_MS, 60000);
-  assert.equal(MAX_TIMEOUT_MS, 900000);
+  assert.equal(MAX_TIMEOUT_MS, 1800000);
   assert.equal(TIMEOUT_ENV_KEY, 'CODEX_STATELINE_PELICAN_TIMEOUT_MS');
-  assert.deepEqual(resolveTimeoutMs({ explicit: undefined, env: {} }), { timeoutMs: 900000, configWarning: null });
+  assert.deepEqual(resolveTimeoutMs({ explicit: undefined, env: {} }), { timeoutMs: 1200000, configWarning: null });
   assert.deepEqual(resolveTimeoutMs({ explicit: 250000, env: { [TIMEOUT_ENV_KEY]: '600000' } }), { timeoutMs: 250000, configWarning: null });
-  for (const raw of ['60000', '600001', '900000']) {
+  for (const raw of ['60000', '600001', '1200000', '1800000']) {
     const resolved = resolveTimeoutMs({ env: { [TIMEOUT_ENV_KEY]: raw } });
     assert.deepEqual(resolved, { timeoutMs: Number(raw), configWarning: null });
     assert.equal(createRunner({ env: { [TIMEOUT_ENV_KEY]: raw }, spawnImpl: () => assert.fail('no spawn') }).budgetMs, Number(raw));
   }
   for (const raw of ['', undefined, null]) {
     const env = raw === undefined ? {} : { [TIMEOUT_ENV_KEY]: raw };
-    assert.deepEqual(resolveTimeoutMs({ env }), { timeoutMs: 900000, configWarning: null }, 'absent or empty env keeps the silent default');
+    assert.deepEqual(resolveTimeoutMs({ env }), { timeoutMs: 1200000, configWarning: null }, 'absent or empty env keeps the silent default');
   }
-  for (const raw of ['59999', '900001', '0', '-1', '1.5', ' 60000', '60000 ', '6e5', '0x1', '+60000', '060000', 'NaN', 'Infinity', 'private-secret', '60000ms', ['60000'], 60000, {}]) {
+  for (const raw of ['59999', '1800001', '0', '-1', '1.5', ' 60000', '60000 ', '6e5', '0x1', '+60000', '060000', 'NaN', 'Infinity', 'private-secret', '60000ms', ['60000'], 60000, {}]) {
     const env = raw === undefined ? {} : { [TIMEOUT_ENV_KEY]: raw };
-    assert.deepEqual(resolveTimeoutMs({ env }), { timeoutMs: 900000, configWarning: 'timeout_config_invalid' }, `raw=${String(raw)}`);
+    assert.deepEqual(resolveTimeoutMs({ env }), { timeoutMs: 1200000, configWarning: 'timeout_config_invalid' }, `raw=${String(raw)}`);
   }
-  assert.deepEqual(resolveTimeoutMs({ env: {} }), { timeoutMs: 900000, configWarning: null });
-  assert.equal(createRunner({ env: { [TIMEOUT_ENV_KEY]: 'private-secret' }, spawnImpl: () => assert.fail('no spawn') }).budgetMs, 900000);
-  const safe = pickDiagnostics({ startedAt: new Date(0).toISOString(), finishedAt: new Date(1).toISOString(), timeoutMs: 900000, elapsedMs: 1, firstEventElapsedMs: 0, lastEventElapsedMs: 1, lastPhase: 'waiting', terminationReason: 'completed', cleanupStatus: 'confirmed', configWarning: 'timeout_config_invalid', raw: 'private-secret' });
+  assert.deepEqual(resolveTimeoutMs({ env: {} }), { timeoutMs: 1200000, configWarning: null });
+  assert.equal(createRunner({ env: { [TIMEOUT_ENV_KEY]: 'private-secret' }, spawnImpl: () => assert.fail('no spawn') }).budgetMs, 1200000);
+  const safe = pickDiagnostics({ startedAt: new Date(0).toISOString(), finishedAt: new Date(1).toISOString(), timeoutMs: 1200000, elapsedMs: 1, firstEventElapsedMs: 0, lastEventElapsedMs: 1, lastPhase: 'waiting', terminationReason: 'completed', cleanupStatus: 'confirmed', configWarning: 'timeout_config_invalid', raw: 'private-secret' });
   assert.deepEqual(Object.keys(safe).sort(), [...DIAGNOSTIC_KEYS].sort());
   assert.equal(safe.configWarning, 'timeout_config_invalid');
   assert.equal(JSON.stringify(safe).includes('private'), false);
@@ -1406,7 +1414,7 @@ test('pelican runner succeeds on quiet long output and terminates only at the ab
           assert.equal(result.value.diagnostics.firstEventElapsedMs, 119999);
           assert.equal(result.value.diagnostics.elapsedMs, 119999);
           assert.deepEqual(Object.keys(result.value.diagnostics).sort(), [...DIAGNOSTIC_KEYS].sort());
-          tick(900000);
+          tick(1200000);
           assert.equal(kills, 0, 'completion clears the deadline');
         } else {
           child.stdout.emit('data', JSON.stringify({ type: 'thread.started' }) + String.fromCharCode(10));
@@ -1565,7 +1573,7 @@ test('pelican service persists allowlisted diagnostics and stays compatible with
 test('pelican service copies only allowlisted diagnostics from arbitrary runner objects', async () => {
   const state = { runs: [], reservations: {}, nextSeq: 1 };
   const service = await createBenchmarkService({ store: { load: async () => {}, snapshot: async () => structuredClone(state), mutate: async fn => fn(state), close: async () => {} },
-    runner: { budgetMs: 900000, runCase: async () => ({ answer: '<svg/>', diagnostics: { startedAt: new Date(0).toISOString(), finishedAt: new Date(1).toISOString(), timeoutMs: 900000, elapsedMs: 1, firstEventElapsedMs: 0, lastEventElapsedMs: 1, lastPhase: 'generating', terminationReason: 'completed', cleanupStatus: 'confirmed', configWarning: 'timeout_config_invalid', secret: 'private-secret', nested: { raw: 'private-secret' } } }) } });
+    runner: { budgetMs: 1200000, runCase: async () => ({ answer: '<svg/>', diagnostics: { startedAt: new Date(0).toISOString(), finishedAt: new Date(1).toISOString(), timeoutMs: 1200000, elapsedMs: 1, firstEventElapsedMs: 0, lastEventElapsedMs: 1, lastPhase: 'generating', terminationReason: 'completed', cleanupStatus: 'confirmed', configWarning: 'timeout_config_invalid', secret: 'private-secret', nested: { raw: 'private-secret' } } }) } });
   await service.run({ requestId: 'allowlist_request_123' });
   await service.close();
   const item = state.runs[0].caseResults[0];
@@ -1574,6 +1582,52 @@ test('pelican service copies only allowlisted diagnostics from arbitrary runner 
   assert.equal(item.diagnostics.configWarning, 'timeout_config_invalid');
   assert.equal(JSON.stringify(state).includes('private-secret'), false);
   assert.equal(JSON.stringify(state).includes('nested'), false);
+});
+
+test('Cockpit startup stall is bounded but a started turn may keep thinking', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'cockpit-startup-watchdog-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const mode of ['stalled', 'started']) {
+    await t.test(mode, async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      const line = value => JSON.stringify(value) + String.fromCharCode(10);
+      let child; let kills = 0; let ready;
+      const started = new Promise(resolve => { ready = resolve; });
+      const runner = createRunner({ tempRoot: root, spawnImpl: () => {
+        child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: { end() { queueMicrotask(() => {
+          child.stdout.emit('data', line({ type: 'thread.started', thread_id: 'thread' }));
+          if (mode === 'started') child.stdout.emit('data', line({ type: 'turn.started' }));
+          ready();
+        }); } }, kill() { kills++; this.emit('close', null, 'SIGKILL'); } });
+        return child;
+      } });
+      const outcome = runner.runCase({ caseDef: COCKPIT_CASES[0] }).then(value => ({ value }), error => ({ error }));
+      try {
+        await started;
+        t.mock.timers.tick(119999);
+        assert.equal(kills, 0);
+        t.mock.timers.tick(1);
+        if (mode === 'stalled') {
+          const result = await outcome;
+          assert.equal(result.error.code, 'upstream_stalled');
+          assert.equal(kills, 1);
+        } else {
+          child.stdout.emit('data', line({ type: 'item.completed', item: { type: 'agent_message', text: '<!doctype html><html><body><svg></svg></body></html>' } }));
+          child.stdout.emit('data', line({ type: 'turn.completed' }));
+          child.emit('close', 0);
+          const result = await outcome;
+          assert.equal(result.error, undefined);
+          assert.equal(kills, 0, 'turn.started disarms the startup watchdog');
+          t.mock.timers.tick(1200000);
+          assert.equal(kills, 0, 'completion also clears the absolute deadline');
+        }
+      } finally {
+        child?.emit('close', 0);
+        await outcome;
+        t.mock.timers.reset();
+      }
+    });
+  }
 });
 
 test('zero-output stall stops as upstream_stalled when no item ever arrives', async (t) => {
@@ -1626,6 +1680,18 @@ test('a run that already produced output survives a burst of recoverable errors'
   assert.equal(result.diagnostics.errorEventCount, 3);
   assert.equal(result.diagnostics.terminationReason, 'completed');
   assert.equal(result.diagnostics.exitCode, 0);
+});
+
+test('Cockpit preserves configured and explicit effort without changing other modes', async () => {
+  for (const [mode, requested, expected] of [['cockpit', undefined, 'configured'], ['cockpit', 'ultra', 'ultra'], ['html-animated', undefined, 'configured']]) {
+    const state = { runs: [], reservations: {}, nextSeq: 1 };
+    const calls = [];
+    const service = await createBenchmarkService({ store: { load: async () => {}, snapshot: async () => structuredClone(state), mutate: async fn => fn(state), close: async () => {} }, runner: { runCase: async input => { calls.push(input); return { answer: mode === 'cockpit' ? '<!doctype html><html><body><svg></svg></body></html>' : HTML_PREVIEW_FIXTURE }; } } });
+    await service.run({ requestId: `effort_${mode}_${requested ?? 'default'}`, mode, ...(requested ? { reasoningEffort: requested } : {}) });
+    await service.close();
+    assert.equal(calls[0].reasoningEffort, expected);
+    assert.equal(state.runs[0].reasoningEffort, expected);
+  }
 });
 
 test('service retries an upstream stall once and keeps the stalled code visible', async () => {

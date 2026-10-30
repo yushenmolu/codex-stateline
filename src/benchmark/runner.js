@@ -9,9 +9,12 @@ import { validModel, validEffort, EFFORT_VALUES } from '../telemetry/usage.js';
 
 export const MODEL_SENTINEL = 'configured';
 export const SAFE_PROGRESS_EVENTS = new Set(['thread.started', 'turn.started', 'item.started', 'item.updated', 'item.completed', 'turn.completed', 'turn.failed', 'error']);
-export const DEFAULT_TIMEOUT_MS = 900000;
+// Cockpit generation can still be making progress after the old fifteen-minute
+// cutoff. Allow twenty minutes by default, with a finite thirty-minute ceiling
+// for explicit configuration; retry and cleanup policies remain unchanged.
+export const DEFAULT_TIMEOUT_MS = 1200000;
 export const MIN_TIMEOUT_MS = 60000;
-export const MAX_TIMEOUT_MS = 900000;
+export const MAX_TIMEOUT_MS = 1800000;
 export const TIMEOUT_ENV_KEY = 'CODEX_STATELINE_PELICAN_TIMEOUT_MS';
 // Legacy short names the desktop panel used before the catalog became the
 // source of truth. A short name carries no provider, so the provider is taken
@@ -141,7 +144,7 @@ const TERMINATION_REASONS = new Set(['completed', 'budget_exhausted', 'cancelled
 const CLEANUP_STATUSES = new Set(['confirmed', 'unconfirmed', 'not_needed']);
 const CONFIG_WARNINGS = new Set(['timeout_config_invalid']);
 const LAST_ERROR_CLASSES = new Set(['reconnect_notice', 'upstream_notice', 'authentication_notice', 'rate_limit_notice', 'model_notice', 'other']);
-const GENERATION_INSTRUCTIONS = 'This is self-contained document generation. Follow the original user prompt directly and return the requested document. Do not perform repository engineering workflows or use commands, MCP tools, subagents, or file operations. Preserve all applicable safety and authorization rules.';
+const GENERATION_INSTRUCTIONS = 'This is self-contained document generation. Follow the original user prompt directly and return only the requested document, without introductory prose, Markdown fences, or a closing explanation. Keep the implementation focused on the requested artwork and motion; avoid adding unrequested page sections or elaborate control panels. Do not perform repository engineering workflows or use commands, MCP tools, subagents, or file operations. Preserve all applicable safety and authorization rules.';
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))];
@@ -296,7 +299,7 @@ export function createRunner({ executable = resolveExecutable(), spawnImpl = spa
   return {
     budgetMs,
     async runCase({ model = 'configured', reasoningEffort = 'configured', caseDef, signal, onProgress }) {
-      let child; let timer; let abortHandler; let stopPromise; let failure;
+      let child; let timer; let startupTimer; let abortHandler; let stopPromise; let failure;
       let exited; let exitConfirmed = false; let helperCleanupConfirmed = true; let resolveStopped;
       const startedMs = wallClock();
       const diagnostics = {
@@ -335,7 +338,7 @@ export function createRunner({ executable = resolveExecutable(), spawnImpl = spa
       const decoder = new StringDecoder('utf8');
       // The stream is parsed line by line as it arrives. Only the final answer is
       // retained, so a long reasoning summary cannot inflate the answer budget.
-      let answer = null; let turnCompleted = false; let malformed = false; let sawFailure = null;
+      let answer = null; let turnCompleted = false; let malformed = false; let sawFailure = null, sawReconnect = false;
       let streamBytes = 0; let stderrBytes = 0; let remainder = '';
       let lastEvent = null; let outputStarted = false;
       const publish = (stage, type = null) => {
@@ -350,6 +353,10 @@ export function createRunner({ executable = resolveExecutable(), spawnImpl = spa
         let event;
         try { event = JSON.parse(line); } catch { malformed = true; return; }
         if (!event || typeof event !== 'object' || Array.isArray(event)) { malformed = true; return; }
+        if (event.type === 'turn.started') {
+          clearTimeout(startupTimer);
+          startupTimer = null;
+        }
         // Answer extraction is independent from the safe-progress allowlist: a
         // registered case may only be scored from a complete agent_message.
         if (event.type === 'item.completed' && event.item?.type === 'agent_message' && typeof event.item.text === 'string') {
@@ -361,6 +368,7 @@ export function createRunner({ executable = resolveExecutable(), spawnImpl = spa
         // discard a run that the CLI is still retrying. Every other error event and
         // every turn.failed stays terminal.
         const notice = recoverableNotice(event);
+        if (notice) sawReconnect = true;
         if (!notice && (event.type === 'error' || event.type === 'turn.failed')) {
           sawFailure ??= failureCode(event);
           void stop(sawFailure);
@@ -475,6 +483,12 @@ export function createRunner({ executable = resolveExecutable(), spawnImpl = spa
         });
         child.stdin?.on?.('error', () => { void stop('process_failed'); });
         timer = setTimeout(() => { void stop('timed_out'); }, budgetMs);
+        if (caseDef.caseId === 'pelican-cockpit') {
+          // Waiting two minutes for the first turn is not useful model reasoning.
+          // Retry that startup stall through the service, but disarm this watchdog
+          // as soon as a turn starts so legitimate long thinking is not killed.
+          startupTimer = setTimeout(() => { void stop('upstream_stalled'); }, Math.min(120000, budgetMs));
+        }
         abortHandler = () => { void stop('cancelled'); };
         signal?.addEventListener('abort', abortHandler, { once: true });
         if (signal?.aborted) abortHandler();
@@ -494,6 +508,10 @@ export function createRunner({ executable = resolveExecutable(), spawnImpl = spa
         if (failure) throw failWith(failure, { reason: failure });
         if (exit.signalName) throw failWith('process_failed');
         const processFailed = exit.code !== 0;
+        // A reconnect followed by a natural non-zero exit is still a dropped
+        // upstream turn. Preserve that evidence so the service's existing single
+        // retry can run instead of misclassifying it as a local process failure.
+        if (sawReconnect && !turnCompleted && processFailed) throw failWith('upstream_stream_lost');
         if (sawFailure || processFailed || malformed) throw failWith(sawFailure ?? (processFailed ? 'process_failed' : 'malformed_output'));
         if (!answer || !turnCompleted) throw failWith('incomplete_output');
         outcome = { value: { answer, stderrTruncated: stderrBytes >= MAX_STDERR } };
@@ -501,6 +519,7 @@ export function createRunner({ executable = resolveExecutable(), spawnImpl = spa
         outcome = { error: error?.code ? error : failWith('spawn_failed') };
       } finally {
         clearTimeout(timer);
+        clearTimeout(startupTimer);
         if (abortHandler) signal?.removeEventListener('abort', abortHandler);
         try { await stopPromise; } catch { /* Terminal classification is produced below. */ }
         try {

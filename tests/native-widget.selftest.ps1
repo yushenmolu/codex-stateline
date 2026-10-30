@@ -812,7 +812,7 @@ $window.ResultsWindow.UpdateLayout()
 PumpUntil {$cockpitImage.Width -gt 1 -and [Math]::Abs($cockpitImage.Height-$cockpitImage.Width*600/960) -lt 1}
 Assert ($null -ne $cockpitImage -and $cockpitImage.Width -gt 0 -and [Math]::Abs($cockpitImage.Height-$cockpitImage.Width*600/960) -lt 1 -and $cockpitImage.Width -le $casePanel.ActualWidth+1 -and $cockpitImage.Stretch -eq [Windows.Media.Stretch]::Uniform -and [Windows.Automation.AutomationProperties]::GetAutomationId($cockpitImage) -ceq 'CockpitPreviewImage') 'Cockpit Image did not contain within the available width or lost identity'
 Assert ((UiText $window.ResultsWindow) -match '点击画面中的播放/暂停按钮操作作品') 'inline artwork interaction explanation missing'
-Assert ((UiText $window.ResultsWindow) -match '系统减少动态效果可能使作品默认暂停' -and (UiText $window.ResultsWindow) -match '最多每秒 5 帧') 'inline sampling/reduced-motion explanation missing'
+Assert ((UiText $window.ResultsWindow) -match '系统减少动态效果可能使作品默认暂停' -and (UiText $window.ResultsWindow) -match '最高约 30 帧/秒') 'inline sampling/reduced-motion explanation missing'
 $workArea=[Windows.SystemParameters]::WorkArea;$resultsBounds=$window.ResultsWindow
 Assert ($resultsBounds.Width -le $workArea.Width -and $resultsBounds.Height -le $workArea.Height -and $resultsBounds.MinWidth -le $workArea.Width -and $resultsBounds.MinHeight -le $workArea.Height -and $resultsBounds.Left -ge $workArea.Left -and $resultsBounds.Top -ge $workArea.Top -and $resultsBounds.Left+$resultsBounds.Width -le $workArea.Right -and $resultsBounds.Top+$resultsBounds.Height -le $workArea.Bottom) 'default Results bounds exceed WorkArea'
 $caseScroll=@(Visuals $window.ResultsWindow|Where-Object {$_ -is [Windows.Controls.ScrollViewer] -and [object]::ReferenceEquals($_.Content,$casePanel)})[0]
@@ -832,7 +832,7 @@ Assert (-not (BeginCockpitClick 0 0) -and $null -eq (WindowField 'cockpitShownTa
 $redBytes=FrameBytes 255 0;$blueBytes=FrameBytes 0 255
 $redFrame=FixtureFrame $target $operation 1 $redBytes
 ApplyFrame $redFrame
-Assert ($null -ne $cockpitImage.Source -and $cockpitImage.Source.IsFrozen -and (WindowField 'cockpitMessage').Text -ceq '动画预览已加载 · 最多每秒 5 帧') 'first in-memory frame did not render'
+Assert ($null -ne $cockpitImage.Source -and $cockpitImage.Source.IsFrozen -and (WindowField 'cockpitMessage').Text -ceq '动画预览已加载 · 最高约 30 帧/秒') 'first in-memory frame did not render'
 $firstBitmap=$cockpitImage.Source;$firstPixels=PixelBytes $cockpitImage;$heartbeatsBefore=$window.Heartbeats;$frameWidth=$cockpitImage.Width;$frameHeight=$cockpitImage.Height
 QueueFrame (FixtureFrame $target $operation 2 $blueBytes)
 PumpUntil {(WindowField 'cockpitAppliedFrames') -ge 2}
@@ -942,21 +942,21 @@ try {
         $openControl=@($casePanel.Children|Where-Object {$_ -is [Windows.Controls.Button] -and [Windows.Automation.AutomationProperties]::GetAutomationId($_) -eq 'OpenHtmlPreview'})[0]
         if($bounds[1] -eq 420){
             Assert ((WindowField 'cockpitMessage').IsVisible -and (WindowField 'cockpitMessage').Text -match '作品操作未发送') 'compact density hid the preceding rejected artwork operation'
-            $null=InvokeWindow 'SetCockpitMessage' @('动画预览已加载 · 最多每秒 5 帧')
+            $null=InvokeWindow 'SetCockpitMessage' @('动画预览已加载 · 最高约 30 帧/秒')
             PumpUntil {$cockpitImage.ActualHeight -ge 150 -and -not (WindowField 'cockpitMessage').IsVisible -and -not (WindowField 'resultHeading').IsVisible}
             $imagePoint=$cockpitImage.TranslatePoint((New-Object Windows.Point 0,0),$caseScroll);$actionPoint=$openControl.TranslatePoint((New-Object Windows.Point 0,0),$caseScroll)
             Assert ($cockpitImage.ActualHeight -ge 150 -and $imagePoint.X -ge -1 -and $imagePoint.Y -ge -1 -and $imagePoint.X+$cockpitImage.ActualWidth -le $caseScroll.ViewportWidth+1 -and $imagePoint.Y+$cockpitImage.ActualHeight -le $caseScroll.ViewportHeight+1 -and $caseScroll.ScrollableHeight -le 1) ('compact artwork is too small or incomplete: '+$cockpitImage.ActualWidth+'x'+$cockpitImage.ActualHeight)
             Assert ($openControl.IsVisible -and $openControl.IsEnabled -and $actionPoint.Y -ge -1 -and $actionPoint.Y+$openControl.ActualHeight -le $caseScroll.ViewportHeight+1) 'compact artwork action is not reachable without scrolling'
             Assert ($openControl.ToolTip -match '运行诊断' -and $openControl.ToolTip -match '清理已确认') 'compact Cockpit diagnostics remained on a collapsed case heading'
-            Assert ((WindowField 'cockpitExplanation').IsVisible -and (WindowField 'cockpitExplanation').Text -ceq '点击画面中的播放/暂停按钮操作作品。' -and (WindowField 'cockpitExplanation').ToolTip -match '最多每秒 5 帧' -and (WindowField 'cockpitExplanation').ToolTip -match '系统减少动态效果可能使作品默认暂停' -and $openControl.ToolTip -match '弹窗内预览 · 支持作品交互') 'compact operation guidance or detailed tooltip missing'
+            Assert ((WindowField 'cockpitExplanation').IsVisible -and (WindowField 'cockpitExplanation').Text -ceq '点击画面中的播放/暂停按钮操作作品。' -and (WindowField 'cockpitExplanation').ToolTip -match '最高约 30 帧/秒' -and (WindowField 'cockpitExplanation').ToolTip -match '系统减少动态效果可能使作品默认暂停' -and $openControl.ToolTip -match '弹窗内预览 · 支持作品交互') 'compact operation guidance or detailed tooltip missing'
             $null=InvokeWindow 'SetCockpitMessage' @('作品操作未发送，请稍后重试。');$window.ResultsWindow.UpdateLayout()
             Assert ((WindowField 'cockpitMessage').IsVisible -and (WindowField 'cockpitMessage').Text -match '作品操作未发送') 'compact density hid an artwork input error'
             $benchControl=WindowField 'bench';$savedBench=$benchControl.Text;$benchControl.Text=[CodexNative.WidgetClient]::ErrorDescription('disconnected');$null=InvokeWindow 'UpdateControls'
             PumpUntil {(WindowField 'processStatus').IsVisible}
             Assert ((WindowField 'processStatus').IsVisible -and (WindowField 'processStatus').Text -ceq $benchControl.Text) 'compact density hid a service/process error'
-            $benchControl.Text=$savedBench;$null=InvokeWindow 'UpdateControls';$null=InvokeWindow 'SetCockpitMessage' @('动画预览已加载 · 最多每秒 5 帧')
+            $benchControl.Text=$savedBench;$null=InvokeWindow 'UpdateControls';$null=InvokeWindow 'SetCockpitMessage' @('动画预览已加载 · 最高约 30 帧/秒')
         }else{
-            PumpUntil {(WindowField 'resultHeading').IsVisible -and (WindowField 'cockpitMessage').IsVisible -and (WindowField 'cockpitExplanation').Text -match '最多每秒 5 帧'}
+            PumpUntil {(WindowField 'resultHeading').IsVisible -and (WindowField 'cockpitMessage').IsVisible -and (WindowField 'cockpitExplanation').Text -match '最高约 30 帧/秒'}
             Assert ((WindowField 'resultTitle').FontSize -eq 22 -and (WindowField 'resultHeading').IsVisible -and (WindowField 'cockpitMessage').IsVisible) 'compact density leaked into the default/wide layout'
             Assert ($openControl.IsVisible -and $openControl.ToolTip -match '运行诊断' -and $openControl.ToolTip -match '结束原因 正常完成') 'normal Cockpit artwork lost accessible diagnostics'
         }
