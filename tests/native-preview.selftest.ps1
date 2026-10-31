@@ -572,7 +572,17 @@ const expression = fs.readFileSync(process.argv[2], 'utf8');
  }
  $blockedHandler=New-Object CodexNative.PreviewFixtureHandler;$blockedHandler.Cockpit=$true;$blockedHandler.SourceJson=ConvertTo-Json -Compress (SourceBody);$blockedHandler.BlockSource=$true
  $blockedSource=[CodexNative.PreviewFixtures]::Create($blockedHandler,(Join-Path $fixtureRoot 'source-barrier-must-not-launch.exe'),$args);$controllers.Add($blockedSource)
- try{$stale=$blockedSource.SetTargetAsync($ct,[CodexNative.PreviewOpenReason]::ExplicitOpen);Assert ($blockedHandler.SourceEntered.Wait(10000)) 'source did not reach barrier';$latest=$blockedSource.StopAsync('source-barrier');$blockedHandler.SourceRelease.Set();$null=Await $stale;$r=Await $latest;Assert ($r.State -eq 'closed' -and $r.OperationGeneration -eq 2 -and $null -eq (Field $blockedSource 'directory') -and (Field $blockedSource 'job') -eq [IntPtr]::Zero) 'late source launched after Stop'}finally{$blockedHandler.SourceRelease.Set();$null=Await ($blockedSource.StopAsync('source-barrier-finally'));$blockedSource.Dispose()}
+ try{
+  $staleTarget=New-Object CodexNative.PreviewTarget;foreach($targetField in $ct.GetType().GetFields([Reflection.BindingFlags]'Instance,Public,NonPublic')){$targetField.SetValue($staleTarget,$targetField.GetValue($ct))}
+  $staleSnapshot=$blockedSource.Snapshot;$staleSnapshot.Target=$staleTarget;$staleSnapshot.State='error';$staleSnapshot.ErrorCode='source_unavailable';$staleSnapshot.Stage='service_unavailable'
+  $blockedSource.GetType().GetField('snapshot',[Reflection.BindingFlags]'Instance,NonPublic').SetValue($blockedSource,$staleSnapshot)
+  $stale=$blockedSource.SetTargetAsync($ct,[CodexNative.PreviewOpenReason]::ExplicitOpen);Assert ($blockedHandler.SourceEntered.Wait(10000)) 'source did not reach barrier'
+  $live=$blockedSource.Snapshot
+  Assert ($live.OperationGeneration -eq 1 -and $live.Target.RunId -eq $ct.RunId -and $live.State -eq 'starting' -and $null -eq $live.ErrorCode -and $live.Stage -eq 'reading_result') 'new operation inherited prior error snapshot or mismatched stage'
+  $latest=$blockedSource.StopAsync('source-barrier');$stopping=$blockedSource.Snapshot
+  Assert ($stopping.OperationGeneration -eq 2 -and $null -eq $stopping.Target -and $stopping.State -eq 'closing' -and $stopping.Stage -eq 'scheduled') 'Stop snapshot mixed the prior target or operation stage'
+  $blockedHandler.SourceRelease.Set();$null=Await $stale;$r=Await $latest;Assert ($r.State -eq 'closed' -and $r.OperationGeneration -eq 2 -and $null -eq (Field $blockedSource 'directory') -and (Field $blockedSource 'job') -eq [IntPtr]::Zero) 'late source launched after Stop'
+ }finally{$blockedHandler.SourceRelease.Set();$null=Await ($blockedSource.StopAsync('source-barrier-finally'));$blockedSource.Dispose()}
  foreach($scenario in @('malformed','oversized','timeout')) {
   $captureFailure=[CodexNative.PreviewFixtures]::Create((New-Object CodexNative.PreviewFixtureHandler),$exe,$args);$controllers.Add($captureFailure);$null=Await ($captureFailure.SetTargetAsync((Target),[CodexNative.PreviewOpenReason]::ExplicitOpen));$captureDir=Field $captureFailure 'directory';$captureMembers=@(Members $captureFailure);$captureIdentities=@(MemberIdentities $captureMembers)
   [CodexNative.PreviewFixtures]::InstallBadCapture($captureFailure,$scenario);$watch=[Diagnostics.Stopwatch]::StartNew();while($captureFailure.Snapshot.State -ne 'error' -and $watch.ElapsedMilliseconds -lt 8000){Start-Sleep -Milliseconds 25}

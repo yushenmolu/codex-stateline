@@ -819,6 +819,18 @@ function FixtureFrame($target,[long]$operation,[long]$sequence,[byte[]]$bytes){
     $arguments[0]=$operation;$arguments[1]=$target.psobject.BaseObject;$arguments[2]=$sequence;$arguments[3]=$bytes
     return $frameConstructor.Invoke($arguments)
 }
+Add-Type -ReferencedAssemblies System.dll,System.Core.dll -TypeDefinition @'
+using System;
+using System.Reflection;
+using System.Threading.Tasks;
+public static class NativeFrameThreadFixture {
+    public static void Publish(object window, object frame) {
+        var method = window.GetType().GetMethod("PreviewFrameReady", BindingFlags.Instance | BindingFlags.NonPublic);
+        var task = Task.Run((Action)delegate { method.Invoke(window, new object[] { frame }); });
+        if (!task.Wait(5000)) throw new TimeoutException("background frame callback deadline");
+    }
+}
+'@
 function QueueFrame($frame){$arguments=New-Object object[] 1;$arguments[0]=$frame.psobject.BaseObject;$null=InvokeWindow 'PreviewFrameReady' $arguments}
 function ApplyFrame($frame){QueueFrame $frame;$null=InvokeWindow 'DrainCockpitFrame'}
 function PixelBytes($image){$pixels=New-Object byte[] ($image.Source.PixelWidth*$image.Source.PixelHeight*4);$image.Source.CopyPixels($pixels,($image.Source.PixelWidth*4),0);return ,$pixels}
@@ -881,7 +893,9 @@ Assert ($null -eq (WindowField 'cockpitLoadClock')) 'fixture preview armed the l
 Assert (-not (BeginCockpitClick 0 0) -and $null -eq (WindowField 'cockpitShownTarget')) 'loading accepted artwork input'
 $redBytes=FrameBytes 255 0;$blueBytes=FrameBytes 0 255
 $redFrame=FixtureFrame $target $operation 1 $redBytes
-ApplyFrame $redFrame
+ [NativeFrameThreadFixture]::Publish($window,$redFrame.psobject.BaseObject)
+Assert ($null -ne (WindowField 'pendingCockpitFrame') -and (WindowField 'cockpitFrameDiagnostic') -ceq '已收到首帧，等待界面解码') 'background frame callback accessed WPF state or lost its diagnostic'
+$null=InvokeWindow 'DrainCockpitFrame'
 Assert ($null -ne $cockpitImage.Source -and $cockpitImage.Source.IsFrozen -and (WindowField 'cockpitMessage').Text -ceq '动画预览已加载 · 最高约 30 帧/秒') 'first in-memory frame did not render'
 $firstBitmap=$cockpitImage.Source;$firstPixels=PixelBytes $cockpitImage;$heartbeatsBefore=$window.Heartbeats;$frameWidth=$cockpitImage.Width;$frameHeight=$cockpitImage.Height
 QueueFrame (FixtureFrame $target $operation 2 $blueBytes)
@@ -1140,13 +1154,18 @@ $loadField=$window.GetType().GetField('cockpitLoadClock',$allFields);$budgetFiel
 $open=@($casePanel.Children|Where-Object {$_ -is [Windows.Controls.Button] -and [Windows.Automation.AutomationProperties]::GetAutomationId($_) -eq 'OpenHtmlPreview'})[0];Click $open
 $target=WindowField 'cockpitTarget';$operation=[long](WindowField 'fixturePreviewSnapshot').OperationGeneration
 Assert ((WindowField 'htmlIntent') -and (WindowField 'cockpitMessage').Text -ceq '正在加载动画预览…' -and $null -eq $cockpitImage.Source) 'watchdog fixture did not reach the loading state'
+$waitingSnapshot=WindowField 'fixturePreviewSnapshot';$waitingSnapshot.Stage='waiting_first_frame'
 $loadClock=New-Object Diagnostics.Stopwatch;$loadClock.Start();$loadField.SetValue($window,$loadClock);$null=InvokeWindow 'CheckCockpitLoad'
 Assert ((WindowField 'htmlIntent') -and [object]::ReferenceEquals($loadClock,$loadField.GetValue($window))) 'load watchdog fired before its budget elapsed'
 $budgetField.SetValue($window,0);$null=InvokeWindow 'CheckCockpitLoad'
-Assert (-not (WindowField 'htmlIntent') -and $null -eq $loadField.GetValue($window) -and (WindowField 'cockpitMessage').Text -match '动画预览加载超时' -and $null -eq $cockpitImage.Source -and $null -eq (WindowField 'cockpitShownTarget')) 'load watchdog did not fail visibly'
+Assert (-not (WindowField 'htmlIntent') -and $null -eq $loadField.GetValue($window) -and (WindowField 'cockpitMessage').Text -match '动画预览加载超时' -and (WindowField 'cockpitMessage').Text -match '最后阶段：等待浏览器首帧' -and $null -eq $cockpitImage.Source -and $null -eq (WindowField 'cockpitShownTarget')) 'load watchdog did not preserve the stalled stage'
 $timeoutSchedules=[long](WindowField 'fixturePreviewScheduleCount')
 for($repeat=0;$repeat -lt 3;$repeat++){$cockpitRun.caseResults[0].scores.correctness=2+$repeat;HistoryFixture $null $cockpitRun @($cockpitRun)}
 Assert (-not (WindowField 'htmlIntent') -and [long](WindowField 'fixturePreviewScheduleCount') -eq $timeoutSchedules -and (WindowField 'cockpitMessage').Text -match '动画预览加载超时') 'load timeout was retried by ordinary polling'
+$budgetField.SetValue($window,0);Click $open;$target=WindowField 'cockpitTarget';$operation=[long](WindowField 'fixturePreviewSnapshot').OperationGeneration
+$knownError=New-Object CodexNative.PreviewSnapshot;$knownError.Target=CopyPreviewTarget $target;$knownError.OperationGeneration=$operation;$knownError.State='error';$knownError.ErrorCode='source_unavailable';$knownError.CleanupState='cleaned';$knownError.Stage='reading_result'
+$window.GetType().GetField('fixturePreviewSnapshot',$allFields).SetValue($window,$knownError);$loadClock=New-Object Diagnostics.Stopwatch;$loadClock.Start();$loadField.SetValue($window,$loadClock);$null=InvokeWindow 'CheckCockpitLoad'
+Assert (-not (WindowField 'htmlIntent') -and (WindowField 'cockpitMessage').Text -match '暂时无法读取' -and (WindowField 'cockpitMessage').Text -notmatch '加载超时') 'watchdog replaced a known preview error with a generic timeout'
 $budgetField.SetValue($window,$savedBudget)
 Click $open;$target=WindowField 'cockpitTarget';$operation=[long](WindowField 'fixturePreviewSnapshot').OperationGeneration
 $loadClock=New-Object Diagnostics.Stopwatch;$loadClock.Start();$loadField.SetValue($window,$loadClock)
