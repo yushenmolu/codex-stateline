@@ -1,10 +1,11 @@
 # Archived plans
 
-The latest plan was archived on 2026-10-30 at the user's request to archive and submit the stability repairs to GitHub. The earlier version was accepted and archived on 2026-10-18. Archival does not turn previously untested behavior into verified behavior or establish that an older running service has loaded the source.
+The latest follow-up plan was archived on 2026-10-31 at the user's request. The broader data display and pelican preview stability plan was archived on 2026-10-30; earlier versions were accepted and archived on 2026-10-18. Archival does not turn previously untested behavior into verified behavior or establish that an older running service has loaded the source.
 
 ## Current delivery
 
-- [Data display and pelican preview stability](2026-10-30-widget-stability-plan.md): completed repair scope, requirement/verification mapping, independent review, local evidence references, and remaining limits.
+- [Native preview load-race follow-up](2026-10-31-native-preview-load-race-plan.md): follow-up root cause, race fixes, checks, review outcome, and outstanding ProductionEdge verification.
+- [Data display and pelican preview stability](2026-10-30-widget-stability-plan.md): broader completed repair scope, requirement/verification mapping, independent review, local evidence references, and remaining limits.
 
 ## 2026-10-18 delivery
 
