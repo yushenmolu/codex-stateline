@@ -83,10 +83,11 @@
   --radius-md: 10px;
   --radius-lg: 14px;
   --radius-full: 999px;
-  /* control sizes (44px hit target via :before halo, see components) */
+  /* Compact pointer controls; coarse pointers use the full touch target. */
   --control-h-sm: 24px;
   --control-h: 30px;
   --control-h-lg: 34px;
+  --control-h-touch: 44px;
   --focus-ring-w: 2px;
   --focus-ring-offset-w: 2px;
 

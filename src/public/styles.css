@@ -243,6 +243,12 @@ a:active { color: var(--accent-active); }
   margin-top: var(--space-6);
 }
 
+.controls > button { align-self: end; }
+
+@media (pointer: coarse) {
+  .task-bar button, .controls > button { min-height: var(--control-h-touch); }
+}
+
 label {
   display: grid;
   gap: var(--space-2);
@@ -458,8 +464,7 @@ textarea::placeholder {
 }
 
 .agents {
-  max-height: 72px;
-  overflow: auto;
+  /* Expanded agent details must grow into the page, not a nested scroll trap. */
   margin-top: var(--space-3);
   border-top: 1px solid var(--border-subtle);
 }
@@ -471,9 +476,19 @@ textarea::placeholder {
   font-family: var(--font-mono);
   font-size: var(--text-2xs);
   line-height: 1.45;
-  white-space: nowrap;
+}
+
+.agent-row > .agent-summary {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-row > .agent-detail {
+  margin-top: var(--space-2);
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .agent-row:hover { background: var(--row-hover); color: var(--text-2); }

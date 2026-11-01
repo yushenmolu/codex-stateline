@@ -29,3 +29,24 @@
 - 最终版本的真实 Edge `-ProductionEdge` 验收仍未确认；以上两个超时需在稳定环境下重试，不能用更早版本的通过结果替代。
 - 本次提交只包含 `scripts/native/BrowserPreview.cs`、`scripts/native/WidgetClient.cs`、`tests/native-preview.selftest.ps1` 与 `tests/native-widget.selftest.ps1`。其余工作区修改保持未提交、未回退。
 - 归档仅记录这次修改与验证状态，不表示未验证场景已通过，也不触及服务、认证或用户数据。
+
+## 2026-11-01 补充：清理退出确认修复与 ProductionEdge 验收
+
+### 根因
+
+| 问题 | 修复 | 状态 |
+| --- | --- | --- |
+| `Members()` 在 Edge 辅助进程退出过程中，Job 的已分配数与列出数不一致时会抛错；清理随之失败并把 `exitUnconfirmed` 永久置位，此后每次预览都返回 `cleanup_failed`，只能重启小组件恢复，并在 `%TEMP%` 留下 `codex-html-preview-*` 目录。修复前 ProductionEdge 在 `tests/native-preview.selftest.ps1` 的 inline production cleanup 断言处失败。 | `Members()` 容忍计数变化；清理等待改用 Job 记账信息的 `ActiveProcesses`（`Active()`/`ActiveIn`）；终止后用 `ExitedNow` 同时确认 Job 与已固定进程句柄的退出。无法在预算内确认时保留 Job 句柄（`retainedJob`）与配置目录，返回 `retained_process_exit_unconfirmed`；之后的操作调用 `ConfirmRetainedExit()` 重新终止并确认退出，确认后删除旧目录并继续，无需重启小组件。删除目录的逻辑拆为 `RemoveDirectory`；工作线程退出与 `Dispose` 时终止并释放保留的 Job。 | 完成；新增回归：固定一个 Job 外的存活进程，验证停止时保留、进程存活时重开被拒、进程结束后重开成功且旧目录被删除。 |
+
+### 验证
+
+| 检查 | 结果 |
+| --- | --- |
+| `tests/native-preview.selftest.ps1` | 473 项检查通过。 |
+| `tests/native-preview.selftest.ps1 -ProductionEdge` | 第一次在首次真实 Edge 启动时遇到 `Network.enable` 命令超时（5000ms，`CockpitBrowserGuard.Arm`），清理按设计返回 `retained_process_exit_unconfirmed`；随后重跑通过，754 项检查通过。该超时为间歇性的 Edge 环境问题，未在本次修改范围内。 |
+| `tests/native-widget.selftest.ps1` | 1788 项检查通过。 |
+| `npm run build` | 通过。 |
+| `npm test` | 473 项测试：472 通过，0 失败，1 跳过（含 `tests/web-ui-regression.test.js`）。 |
+| `git diff --check` | 通过。 |
+
+本次提交同时包含 2026-10-26 Web 审计修复包（见 `docs/audit-2026-10-26/fix-report.md`）。

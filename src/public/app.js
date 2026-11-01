@@ -1,4 +1,8 @@
 const $ = id => document.getElementById(id);
+const systemTheme = matchMedia('(prefers-color-scheme: light)');
+function applySystemTheme() { document.documentElement.dataset.theme = systemTheme.matches ? 'light' : 'dark'; }
+applySystemTheme();
+systemTheme.addEventListener('change', applySystemTheme);
 const scoreKeys = ['correctness', 'consistency', 'constraint_adherence'];
 const scoreLabels = ['正确性', '一致性', '约束遵循'];
 const htmlVersion = 'pelican-html-animated-v1';
@@ -12,14 +16,16 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 let previewInstance = null;
 const names = { idle:'未启动', queued:'排队中', running:'运行中', completed:'已完成', failed:'失败', timed_out:'超时', cancelled:'已取消', interrupted:'已中断' };
 const labels = { 'pelican-cockpit':'鹈鹕骑自行车（Cockpit 原始提示词）', 'pelican-html-animated':'鹈鹕骑自行车（HTML/CSS 动画）', 'pelican-svg-animated':'鹈鹕骑自行车（动画）', 'pelican-svg':'鹈鹕骑自行车', 'instruction-following':'指令遵循', 'logic-grid':'逻辑网格', 'code-trace':'代码追踪' };
-const state = { nonce:null, requestId:null, displayed:null, benchmarkKey:null, drafts:new Map(), urls:[], busy:false, polling:false, telemetryPolling:false, benchmarkAvailable:false, taskId:null, pinned:false, taskGeneration:0, tasksSupported:true, tasks:[], tasksStale:false, tasksTruncated:false, tasksSampled:null };
+const state = { nonce:null, requestId:null, displayed:null, benchmarkKey:null, casesKey:null, catalogModelsKey:null, catalogEffortsKey:null, catalogModelsReady:false, catalogEffortsReady:false, activeRun:null, reconciledRequestId:null, drafts:new Map(), urls:[], busy:false, polling:false, benchmarkGeneration:0, benchmarkFlight:0, benchmarkQueued:false, benchmarkStale:false, submissionUnknown:null, reconciling:false, telemetryPolling:false, benchmarkAvailable:false, taskId:null, pinned:false, taskGeneration:0, tasksSupported:true, tasks:[], tasksStale:false, tasksTruncated:false, tasksSampled:null };
 const format = v => Number.isFinite(v) ? new Intl.NumberFormat('zh-CN', { maximumFractionDigits:1 }).format(v) : '—';
 const errors = { nonce_invalid:'验证已过期，请重试。', run_active:'已有基准运行，请稍后重试。', benchmark_busy:'已有基准运行，请稍后重试。', request_conflict:'请求冲突，请刷新后重试。', score_invalid:'评分无效，请检查题目版本与分数。', schema_invalid:'请求无效，请刷新后重试。', run_not_found:'运行不存在，请刷新后重试。', service_unavailable:'本地服务不可用，请检查服务。', benchmark_unavailable:'基准不可用，请检查 Codex CLI。', baseline_invalid:'请先完成全部评分。', task_not_found:'固定任务不在当前列表，已保留选择。', query_invalid:'任务查询无效。', telemetry_unavailable:'任务遥测暂不可用。', tasks_unavailable:'任务列表暂不可用。' };
 function safeError(error) { return errors[error?.code] ?? '操作失败，请检查本地服务后重试。'; }
 // A failed case carries its own classified code; saying why beats a generic banner.
 const caseErrors = { upstream_stream_lost:'上游中转中断了生成流（已自动重试一次）。这不是本机环境问题，请稍后重试或换一个模型提供方。', process_failed:'Codex 进程执行失败，请检查本地运行环境。', timed_out:'运行超时，请稍后重试。', authentication_failed:'身份验证失败，请检查 Codex 登录状态或中转配置凭据。', rate_limited:'请求受到限流，请稍后重试。', upstream_stalled:'上游中转长时间没有任何输出（已自动重试一次）。这不是本机环境问题，请稍后重试或换一个模型提供方。', model_unavailable:'所选模型不可用，请检查模型配置。', malformed_output:'模型输出格式无效。', incomplete_output:'模型输出不完整。', answer_too_large:'回答超过大小限制。', output_too_large:'进程输出超过大小限制。', invalid_config:'模型或推理配置无效。' };
 function caseErrorText(code) { return caseErrors[code] ?? ''; }
-function message(text, error=false) { $('benchmark-message').textContent=text; $('benchmark-message').className='message'+(error?' error':''); }
+function setText(node,text) { if(node&&node.textContent!==String(text))node.textContent=text; }
+function message(text, error=false) { const node=$('benchmark-message');setText(node,text);const className='message'+(error?' error':'');if(node.className!==className)node.className=className; }
+function serviceConnection(connected) { $('connection').className='connection '+(connected?'ok':'error');setText($('connection').lastElementChild,connected?'已连接':'不可用'); }
 const safeCount = v => Number.isSafeInteger(v) && v >= 0;
 const validModel = v => typeof v === 'string' && v.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(v);
 const effortLabels = { low:'low', medium:'medium', high:'high', xhigh:'xhigh', max:'max', ultra:'ultra', persistent:'persistent', none:'none' };
@@ -37,25 +43,22 @@ function validTurn(turn) {
 }
 function setTelemetry(value) {
   const data=value&&typeof value==='object'?value:{state:'unavailable'};
-  const statuses={ok:'最近活动主会话',empty:'无主会话',ambiguous:'多主会话',unavailable:'不可用'};
-  $('session-state').textContent=statuses[data.state]??'不可用';
+  const statuses={ok:'最近活动主会话',empty:'无主会话',ambiguous:'多主会话',unavailable:'局部不可用'};
+  setText($('session-state'),statuses[data.state]??'局部不可用');
   const turn=data.state==='ok'&&validTurn(data.lastCompletedTurn)?data.lastCompletedTurn:null;
-  for (const [id,key] of [['input-tokens','inputTokens'],['output-tokens','outputTokens'],['total-tokens','totalTokens']]) $(id).textContent=turn?format(turn[key]):'—';
+  for (const [id,key] of [['input-tokens','inputTokens'],['output-tokens','outputTokens'],['total-tokens','totalTokens']]) setText($(id),turn?format(turn[key]):'—');
   const speed=data.turnAverageSpeed, rate=speed?.outputTokensPerSecond;
   const expected=turn?turn.outputTokens/turn.elapsedSeconds:null;
   const speedOk=turn&&available(speed,'completed_turn')&&speed.completedAt===turn.completedAt&&speed.includesToolsAndWait===true&&Number.isFinite(rate)&&rate>=0&&Math.abs(rate-expected)<=1e-9*Math.max(1,expected);
   const reason=speed?.reason??data.lastCompletedTurn?.reason;
   const detail={bootstrap_in_progress:'正在读取主会话历史',turn_incomplete:'当前回合尚未完成',turn_start_missing:'缺少回合开始记录',read_gap:'日志存在读取缺口',turn_ambiguous:'会话或回合无法唯一确认'}[reason]??'数据缺失或未通过校验';
-  $('speed').textContent=speedOk?format(rate):'—';
+  setText($('speed'),speedOk?format(rate):'—');
   $('speed').title='最近完成回合平均输出 tokens/s，含工具及等待'+(speedOk?'':'；'+detail);
   const context=data.conversationContext;
   const contextOk=data.state==='ok'&&available(context,'turn_context')&&validModel(context.model)&&validEffort(context.reasoningEffort)&&utcTime(context.observedAt);
-  $('conversation-context').textContent='最近活动主会话 · '+(contextOk?'日志模型 '+context.model+' · 推理强度 '+context.reasoningEffort+'('+effortLabel(context.reasoningEffort)+')':'日志模型 / 推理强度未知');
-  $('session-id').textContent=data.state==='ok'&&typeof data.session?.id==='string'?'会话 '+data.session.id:'';
-  $('telemetry-message').textContent=reason==='bootstrap_in_progress'?'正在读取主会话历史，完成后显示最近完成回合。':({ok:'显示最近完成回合的输入/输出/总计与均速；会话按主会话日志活动选择。',empty:'暂无活动主会话。',ambiguous:'多个候选主会话，暂不显示计数。',unavailable:'遥测不可用，请检查本地服务。'})[data.state]??'遥测不可用。';
-  const connected=['ok','empty','ambiguous'].includes(data.state)||reason==='bootstrap_in_progress';
-  $('connection').className='connection '+(connected?'ok':'error');
-  $('connection').lastElementChild.textContent=connected?'已连接':'不可用';
+  setText($('conversation-context'),'最近活动主会话 · '+(contextOk?'日志模型 '+context.model+' · 推理强度 '+context.reasoningEffort+'('+effortLabel(context.reasoningEffort)+')':'日志模型 / 推理强度未知'));
+  setText($('session-id'),data.state==='ok'&&typeof data.session?.id==='string'?'会话 '+data.session.id:'');
+  setText($('telemetry-message'),reason==='bootstrap_in_progress'?'正在读取主会话历史，完成后显示最近完成回合。':({ok:'显示最近完成回合的输入/输出/总计与均速；会话按主会话日志活动选择。',empty:'暂无活动主会话。',ambiguous:'多个候选主会话，暂不显示计数。',unavailable:'当前会话用量局部不可用；任务详情与服务连接不受影响。'})[data.state]??'当前会话用量局部不可用。');
 }
 const taskErrorText=code=>errors[code]??'任务遥测暂不可用。';
 const shortId=id=>typeof id==='string'&&id.length>=8?id.slice(0,8):'未观测';
@@ -69,34 +72,62 @@ function agentStateText(value){ return agentStateLabels[value]??'未知'; }
 function countText(usage,key){ if(!usage||usage[key]===null||usage[key]===undefined)return '未观测'; return safeCount(usage[key])?format(usage[key]):'未知'; }
 function taskLabel(task){ const title=typeof task?.title==='string'?task.title.trim():''; const bounded=title.length>44?title.slice(0,44)+'…':title; return (bounded||'未命名任务')+' · '+shortId(task?.id); }
 function shortModel(value){ const model=typeof value==='string'?value.trim():''; if(!model)return '未观测'; const parts=model.split('/'); const tail=parts[parts.length-1]; return tail.length>18?tail.slice(0,18)+'…':tail; }
+function focusWithoutScroll(node){if(!node?.focus)return;try{node.focus({preventScroll:true});}catch{node.focus();}}
+function syncSelectOptions(select,items){
+  const existing=Array.from(select.options??select.children??[]),byValue=new Map(existing.map(option=>[option.value,option]));
+  const sameOrder=existing.length===items.length&&items.every((item,index)=>existing[index]?.value===item.value);
+  const nodes=items.map((item,index)=>{
+    const option=sameOrder?existing[index]:(byValue.get(item.value)??document.createElement('option'));
+    option.value=item.value;option.disabled=item.disabled===true;setText(option,item.label);
+    if(item.ariaLabel)option.setAttribute('aria-label',item.ariaLabel);
+    if(item.title!==undefined)option.title=item.title;
+    return option;
+  });
+  if(!sameOrder){const focused=document.activeElement===select;select.replaceChildren(...nodes);if(focused)focusWithoutScroll(select);}
+}
 function renderAgents(rows,truncated=false){
-  const box=$('agents');
+  const box=$('agents'),active=document.activeElement,focusedRow=active?.closest?.('details.agent-row');
+  const focusedKey=focusedRow&&box.contains?.(focusedRow)?focusedRow.dataset.agentKey:null;
+  const focusedPart=focusedKey?(active.tagName==='SUMMARY'?'summary':'detail'):null;
+  const open=new Map(Array.from(box.querySelectorAll?.('details.agent-row[data-agent-key]')??[]).map(row=>[row.dataset.agentKey,row.open]));
   const sorted=[...rows].filter(a=>a&&typeof a==='object').sort((x,y)=>associationRank(x.association)-associationRank(y.association)||String(y.updatedAt??'').localeCompare(String(x.updatedAt??'')));
-  if(!sorted.length){ box.replaceChildren(element('p','agent-row muted','代理 · 未观测')); $('agents-meta').textContent='代理 · 未观测'; return; }
+  if(!sorted.length){ box.replaceChildren(element('p','agent-row muted','代理 · 未观测')); setText($('agents-meta'),'代理 · 未观测'); return; }
   let current=0,other=0,unknown=0;
-  box.replaceChildren(...sorted.map(a=>{
+  const nextRows=sorted.map(a=>{
     if(a.association==='current_turn')current++; else if(a.association==='other_turn')other++; else unknown++;
     const role=typeof a.role==='string'&&a.role.trim()?a.role.trim():'未知';
     const model=typeof a.model==='string'&&a.model.trim()?a.model.trim():'未观测';
     const effort=typeof a.effort==='string'&&a.effort.trim()?a.effort.trim():null;
     const detail=role+' · 日志模型 '+model+' · 推理强度 '+(effort?effort+'('+effortLabel(effort)+')':'未观测')+' · '+agentStateText(a.state)+' · '+associationText(a.association);
-    const row=element('p','agent-row',role+' · '+shortModel(a.model)+' · '+agentStateText(a.state)+' · '+associationText(a.association));
-    row.title=detail;
-    return row;
-  }));
-  $('agents-meta').textContent='代理 '+sorted.length+' · 当前回合 '+current+' · 其他 '+other+' · 未知 '+unknown+(truncated?' · 列表可能已截断':'');
+    const key=typeof a.id==='string'&&a.id?a.id:[a.parentId,a.rootTurnId,role,model,effort,a.state,a.association].map(value=>String(value??'')).join('|');
+    const row=element('details','agent-row');row.dataset.agentKey=key;row.open=open.get(key)===true;
+    const summary=element('summary','agent-summary',role+' · '+shortModel(a.model)+' · '+agentStateText(a.state)+' · '+associationText(a.association));
+    const full=element('p','agent-detail',detail);
+    row.append(summary,full);return {key,row};
+  });
+  const oldRows=new Map(Array.from(box.children??[]).filter(row=>row.dataset?.agentKey).map(row=>[row.dataset.agentKey,row]));
+  const unchanged=nextRows.length===oldRows.size&&nextRows.every(({key,row},index)=>box.children[index]===oldRows.get(key)&&oldRows.get(key).querySelector?.('.agent-detail')?.textContent===row.querySelector('.agent-detail').textContent);
+  if(!unchanged)box.replaceChildren(...nextRows.map(item=>item.row));
+  setText($('agents-meta'),'代理 '+sorted.length+' · 当前回合 '+current+' · 其他 '+other+' · 未知 '+unknown+(truncated?' · 列表可能已截断':''));
+  if(focusedKey){const row=Array.from(box.querySelectorAll?.('details.agent-row')??[]).find(item=>item.dataset.agentKey===focusedKey);const target=focusedPart==='summary'?row?.querySelector('summary'):row;if(target)focusWithoutScroll(target);}
 }
 function renderTaskOptions(){
-  const select=$('task-select'),items=state.tasks.map(t=>({id:t.id,label:taskLabel(t)}));
-  if(state.pinned&&state.taskId&&!items.some(item=>item.id===state.taskId))items.unshift({id:state.taskId,label:'已固定 · 未在当前列表 · '+shortId(state.taskId)});
-  select.replaceChildren(...items.map(item=>{ const option=document.createElement('option'); option.value=item.id; option.textContent=item.label; return option; }));
-  if(state.taskId&&items.some(item=>item.id===state.taskId))select.value=state.taskId;
+  const counts=new Map();for(const task of state.tasks){const label=taskLabel(task);counts.set(label,(counts.get(label)??0)+1);}
+  const ordinals=new Map();for(const [label,count] of counts)if(count>1){const group=state.tasks.filter(task=>taskLabel(task)===label).sort((a,b)=>a.id.localeCompare(b.id));group.forEach((task,index)=>ordinals.set(task.id,{index:index+1,count}));}
+  const items=state.tasks.map(task=>{const label=taskLabel(task),ordinal=ordinals.get(task.id);const visible=label+(ordinal?' · 任务 '+ordinal.index+'/'+ordinal.count:'');return {value:task.id,label:visible,ariaLabel:visible+' · 完整 ID '+task.id,title:task.id};});
+  if(state.pinned&&state.taskId&&!items.some(item=>item.value===state.taskId))items.unshift({value:state.taskId,label:'已固定 · 未在当前列表 · '+shortId(state.taskId),ariaLabel:'已固定 · 未在当前列表 · 完整 ID '+state.taskId,title:state.taskId});
+  syncSelectOptions($('task-select'),items);const select=$('task-select');
+  if(state.taskId&&items.some(item=>item.value===state.taskId))select.value=state.taskId;
   select.disabled=items.length===0;
-  const pin=$('task-pin');pin.textContent=state.pinned?'固定':'跟随';pin.setAttribute('aria-pressed',state.pinned?'true':'false');pin.title=state.pinned?'已固定当前任务；点击恢复跟随最近任务。':'正在跟随最近任务；点击固定当前任务。';
-  if(!state.taskId&&state.tasksSupported)$('task-flags').textContent='任务列表 '+(state.tasksStale?'陈旧':'新鲜')+(state.tasksTruncated?' · 已截断':'')+' · 采样 '+localClock(state.tasksSampled);
+  const pin=$('task-pin');setText(pin,state.pinned?'固定':'跟随');pin.setAttribute('aria-pressed',state.pinned?'true':'false');pin.title=state.pinned?'已固定当前任务；点击恢复跟随最近任务。':'正在跟随最近任务；点击固定当前任务。';
+  if(!state.taskId&&state.tasksSupported)setText($('task-flags'),'任务列表 '+(state.tasksStale?'陈旧':'新鲜')+(state.tasksTruncated?' · 已截断':'')+' · 采样 '+localClock(state.tasksSampled));
 }
 function applyTaskList(list){
-  const tasks=Array.isArray(list?.tasks)?list.tasks.filter(task=>uuid.test(task?.id??'')):[];
+  const tasks=[];const seen=new Set();
+  for(const task of Array.isArray(list?.tasks)?list.tasks:[]){
+    if(!uuid.test(task?.id??'')||seen.has(task.id))continue;
+    seen.add(task.id);tasks.push(task);
+  }
   state.tasks=tasks;state.tasksStale=list?.stale===true;state.tasksTruncated=list?.truncated===true;state.tasksSampled=typeof list?.sampledAt==='string'?list.sampledAt:null;
   const next=state.pinned?state.taskId:(tasks.length?tasks[0].id:null);
   if(next!==state.taskId){ state.taskId=next; state.taskGeneration++; resetTaskFields(); }
@@ -192,9 +223,9 @@ function wireTaskControls(){
 async function telemetry() {
   if(state.telemetryPolling)return;state.telemetryPolling=true;
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),8000);
-  const entered=state.taskGeneration;
+  const entered=state.taskGeneration;let listError=null;
   try {
-    let list=null,listError=null;
+    let list=null;
     if(state.tasksSupported){
       try {
         const r=await fetch('/api/tasks',{cache:'no-store',signal:controller.signal});
@@ -211,22 +242,22 @@ async function telemetry() {
       const r=await fetch('/api/telemetry',{cache:'no-store',signal:controller.signal});
       if(!r.ok)throw Error();
       const legacy=await r.json();
-      if(generation===state.taskGeneration){ setTelemetry(legacy); setTaskTelemetry(null); }
+      if(generation===state.taskGeneration){ serviceConnection(true);setTelemetry(legacy); setTaskTelemetry(null); }
       return;
     }
     if(id===null){
-      setTelemetry({state:'unavailable'});
+      serviceConnection(listError!=='disconnected');setTelemetry({state:'unavailable'});
       if(list!==null)renderTaskEmpty(); else renderTaskUnavailable(listError??'tasks_unavailable');
       return;
     }
     const r=await fetch('/api/telemetry?taskId='+encodeURIComponent(id),{cache:'no-store',signal:controller.signal});
     if(generation!==state.taskGeneration)return;
-    if(!r.ok){ const d=await r.json().catch(()=>({})); if(generation!==state.taskGeneration)return; setTelemetry({state:'unavailable'}); setTaskTelemetry({error:d?.error?.code??'disconnected'}); return; }
+    if(!r.ok){ const d=await r.json().catch(()=>({})); if(generation!==state.taskGeneration)return; serviceConnection(listError!=='disconnected');setTelemetry({state:'unavailable'}); setTaskTelemetry({error:d?.error?.code??'disconnected'}); return; }
     const data=await r.json();
     if(generation!==state.taskGeneration)return;
-    setTelemetry(data);setTaskTelemetry(data);
+    serviceConnection(true);setTelemetry(data);setTaskTelemetry(data);
   }
-  catch { if(entered===state.taskGeneration){ setTelemetry({state:'unavailable'}); setTaskTelemetry({error:'disconnected'}); } }
+  catch { if(entered===state.taskGeneration){ serviceConnection(false);setTelemetry({state:'unavailable'}); setTaskTelemetry({error:'disconnected'}); } }
   finally { clearTimeout(timer);state.telemetryPolling=false; }
 }
 async function getNonce() { const r=await fetch('/api/nonce',{cache:'no-store',headers:{Accept:'application/json'}}); if(!r.ok)throw Error(); state.nonce=r.headers.get('X-Codex-Companion-Nonce'); if(!state.nonce)throw Error(); }
@@ -248,6 +279,24 @@ function expectedIds(run) {
 function isFullyScored(run) { const ids=expectedIds(run); return run?.status==='completed'&&ids.length>0&&run.caseResults?.length===ids.length&&ids.every(id=>{const c=run.caseResults.find(x=>x.caseId===id);return c?.status==='completed'&&scoreKeys.every(k=>Number.isInteger(c.scores?.[k])&&c.scores[k]>=1&&c.scores[k]<=5);}); }
 function element(tag,className,text) {const el=document.createElement(tag);if(className)el.className=className;if(text!==undefined)el.textContent=text;return el;}
 function revokePreviews(){for(const url of state.urls)URL.revokeObjectURL(url);state.urls=[];}
+function captureBenchmarkFocus(){
+  const active=document.activeElement,box=$('cases');
+  if(!active||!box.contains?.(active)||!['SELECT','BUTTON'].includes(active.tagName))return null;
+  if(!active.dataset?.run||!active.dataset?.case)return null;
+  return {run:active.dataset.run,caseId:active.dataset.case,score:active.dataset.score??null};
+}
+function restoreBenchmarkFocus(token){
+  if(!token)return;
+  const target=Array.from($('cases').querySelectorAll('select[data-score],button.save-score')).find(node=>node.dataset.run===token.run&&node.dataset.case===token.caseId&&(node.dataset.score??null)===token.score);
+  focusWithoutScroll(target);
+}
+function renderCases(run){
+  const key=JSON.stringify({runId:run?.runId??null,status:run?.status??null,caseSetVersion:run?.caseSetVersion??null,rubricVersion:run?.rubricVersion??null,caseResults:run?.caseResults??[],previewInstance});
+  if(key===state.casesKey)return;
+  const focus=captureBenchmarkFocus();revokePreviews();
+  $('cases').replaceChildren(...(run?.caseResults??[]).map(c=>renderCase(run,c)));
+  state.casesKey=key;restoreBenchmarkFocus(focus);
+}
 function parseSvg(answer, animated=false) {
   let source=String(answer).trim();
   if(source.startsWith('```')){const match=/^```(?:svg|xml)?[ \t]*\r?\n([\s\S]*?)\r?\n```$/i.exec(source);if(!match||match[1].includes('```'))return null;source=match[1].trim();}
@@ -325,16 +374,83 @@ function renderCase(run,ca) {
     const button=element('button','secondary save-score','保存评分');button.type='button';button.dataset.run=run.runId;button.dataset.case=ca.caseId;article.append(grid,button);
   }return article;
 }
+function catalogEntries(defaults,kind){
+  const source=kind==='model'?defaults?.availableModels:defaults?.availableEfforts;
+  if(!Array.isArray(source))return {valid:false,items:[]};
+  const seen=new Set(),items=[];
+  for(const entry of source){
+    const value=kind==='model'?entry?.slug:entry?.value;
+    const label=kind==='model'?entry?.displayName:entry?.label;
+    const valid=value==='configured'||(kind==='model'?validModel(value):validEffort(value));
+    if(!valid||seen.has(value)||typeof label!=='string'||!label.trim())continue;
+    seen.add(value);items.push({value,label:label.trim()});
+  }
+  return {valid:true,items};
+}
+function catalogNote(text){
+  let node=$('catalog-message');
+  if(!node){node=element('p','muted');node.id='catalog-message';$('benchmark-message').before(node);}
+  setText(node,text);
+}
+function syncCatalog(defaults){
+  let notice='';
+  for(const kind of ['model','effort']){
+    const select=$(kind),catalog=catalogEntries(defaults,kind),current=select.value;
+    const usable=catalog.items.length>0;
+    const selected=usable&&catalog.items.some(item=>item.value===current)?current:catalog.items.some(item=>item.value==='configured')?'configured':usable?current:'configured';
+    const selectedItems=usable?(catalog.items.some(item=>item.value===selected)?catalog.items:[{value:selected,label:(kind==='model'?'模型：':'推理强度：')+selected+'（目录暂缺）',disabled:true},...catalog.items]):[{value:'configured',label:'沿用配置（目录不可用）'}];
+    const key=JSON.stringify(selectedItems),keyName=kind==='model'?'catalogModelsKey':'catalogEffortsKey';
+    if(state[keyName]!==key){syncSelectOptions(select,selectedItems);state[keyName]=key;}
+    select.value=selected;
+    const ready=selected!=='';
+    state[kind==='model'?'catalogModelsReady':'catalogEffortsReady']=ready;select.disabled=!usable||!ready;
+    if(!usable)notice+=(kind==='model'?'模型':'推理强度')+'目录不可用；仅允许沿用配置，选择已锁定，请检查本地配置。';
+    else if(current&&current!==selected)notice+=(kind==='model'?'模型':'推理强度')+'原选择已不在目录中，'+(selected?'已回退到当前配置。':'未自动改选其他值，已停用选择。');
+  }
+  catalogNote(notice);
+}
+function submittedRun(data,requestId){
+  return [data?.activeRun,data?.latestRun,...(Array.isArray(data?.runs)?data.runs:[])].find(run=>run?.requestId===requestId)??null;
+}
+function submissionMode(run){
+  if(run?.caseSetVersion===cockpitVersion&&run?.rubricVersion===cockpitVersion)return 'cockpit';
+  if(run?.caseSetVersion===htmlVersion&&run?.rubricVersion===htmlVersion)return 'html-animated';
+  if(run?.caseSetVersion==='pelican-svg-animated-v1'&&run?.rubricVersion==='pelican-svg-animated-v1')return 'animated';
+  return 'static';
+}
+function reconcileSubmission(data){
+  const pending=state.submissionUnknown;if(!pending)return null;
+  const run=submittedRun(data,pending.requestId);
+  if(!run){pending.checked=true;pending.conflict=false;return 'missing';}
+  if(run.model!==pending.payload.model||run.reasoningEffort!==pending.payload.reasoningEffort||submissionMode(run)!==pending.payload.mode){pending.checked=true;pending.conflict=true;return 'conflict';}
+  state.submissionUnknown=null;state.requestId=run.requestId;state.reconciledRequestId=run.requestId;
+  return 'resolved';
+}
+function activeBenchmark(){return state.activeRun&&['queued','running'].includes(state.activeRun.status)?state.activeRun:null;}
+function updateRunControls(){
+  const active=activeBenchmark(),pending=state.submissionUnknown;
+  $('run').disabled=state.busy||state.reconciling||!!active||(!state.benchmarkAvailable&&!pending)||!!pending?.conflict||(!!pending&&!pending.checked&&!state.benchmarkStale)||(!pending&&(!state.catalogModelsReady||!state.catalogEffortsReady));
+  $('cancel').classList.toggle('hidden',!active);$('cancel').disabled=state.busy||state.reconciling;
+}
+function unknownSubmissionMessage(){
+  const pending=state.submissionUnknown;if(!pending)return '';
+  if(pending.conflict)return '对账发现同一 requestId 对应不同参数；已停止重试，不会生成新 ID。';
+  if(state.reconciling)return '提交结果未知；正在先用 GET 对账原 requestId，尚未重试。';
+  if(state.benchmarkStale)return '提交结果未知；最近一次对账读取失败，将在后续轮询重试；仍只使用原 requestId，不会生成新 ID。';
+  if(!state.benchmarkAvailable)return '提交结果未知且暂时无法完成对账；恢复后仍只使用原 requestId，不会生成新 ID。';
+  if(activeBenchmark())return '提交结果未知：GET 对账暂未找到原 requestId，当前另有运行；完成后可重试同一请求和参数。';
+  return '提交结果未知，GET 暂未找到原 requestId；可重试同一请求和参数，不会生成新 ID。';
+}
 function renderBenchmark(data) {
-  const run=data.activeRun??data.latestRun;state.displayed=run;
-  const unavailable=data.available===false;state.benchmarkAvailable=!unavailable;
-  const active=!!data.activeRun&&['queued','running'].includes(data.activeRun.status);
-  state.requestId=data.activeRun?.requestId??state.requestId;
-  $('benchmark-state').textContent=unavailable?'不可用':names[run?.status??data.status]??'未启动';$('run').disabled=state.busy||active||unavailable;$('cancel').classList.toggle('hidden',!active);
-  revokePreviews();$('cases').replaceChildren(...(run?.caseResults??[]).map(c=>renderCase(run,c)));$('baseline-control').replaceChildren();
+  const run=data.activeRun??data.latestRun;state.displayed=run;state.activeRun=data.activeRun??null;
+  const unavailable=data.available===false;state.benchmarkAvailable=!unavailable;state.benchmarkStale=false;
+  if(!state.submissionUnknown)state.requestId=data.activeRun?.requestId??state.requestId;
+  setText($('benchmark-state'),unavailable?'不可用':state.submissionUnknown?'提交状态未知':state.reconciling?'正在对账':names[run?.status??data.status]??'未启动');
+  updateRunControls();renderCases(run);$('baseline-control').replaceChildren();
   if(run?.status==='completed'){if(isFullyScored(run)){const button=element('button','secondary baseline-button',run.runId===data.baseline?.runId?'当前基线':'设为基线');button.type='button';button.dataset.run=run.runId;button.disabled=run.runId===data.baseline?.runId;$('baseline-control').append(button);}else $('baseline-control').append(element('p','muted','全部题目评分后可设为基线。'));}
   const c=data.comparison;$('comparison').replaceChildren();
   if(c){const configured=run?.model==='configured'||run?.reasoningEffort==='configured';const box=element('div','comparison-box');box.append(element('strong','',configured||c.inconclusive||c.label==='inconclusive'?'基线比较 · 证据不足':'基线比较 · 可比较'),element('p','muted','前 '+(c.beforeCount??0)+' 次 / 后 '+(c.afterCount??0)+' 次完整评分'));const grid=element('div','comparison-grid');scoreKeys.forEach((k,i)=>{const item=element('div','comparison-item',scoreLabels[i]);const v=c.differences?.[k];item.append(element('strong','',configured||v==null?'—':(v>0?'+':'')+Number(v).toFixed(2)));grid.append(item);});box.append(grid);$('comparison').append(box);}
+  if(state.submissionUnknown){message(unknownSubmissionMessage(),true);return;}
   if(unavailable){message('基准不可用，请检查本地服务。',true);return;}
   message(({completed:'已完成，请评分。',failed:'运行失败，请检查 CLI。',timed_out:'运行超时。',cancelled:'已取消。',interrupted:'运行已中断。',running:'运行中…',queued:'排队中…'})[run?.status]??'启动后运行一道固定题。');
 }
@@ -343,26 +459,112 @@ const progressEvents = new Set(['thread.started','turn.started','item.started','
 function updateProgress(data) {
   const progress=data.activeRun?.progress;
   const node=$('benchmark-progress');
-  if(!progress||!Object.hasOwn(progressStages,progress.stage)||!Number.isFinite(progress.elapsedMs)||progress.elapsedMs<0){node.textContent='';return;}
+  if(!progress||!Object.hasOwn(progressStages,progress.stage)||!Number.isFinite(progress.elapsedMs)||progress.elapsedMs<0){setText(node,'');return;}
   let text=progressStages[progress.stage]+' · 已耗时 '+format(progress.elapsedMs/1000)+' 秒';
   if(Number.isFinite(progress.budgetMs)&&progress.budgetMs>0)text+=' · 总预算 '+format(progress.budgetMs/1000)+' 秒';
   const event=progress.lastEvent;
   if(progressEvents.has(event?.type)&&utcTime(event.at))text+=' · 最近事件 '+event.type+' @ '+new Date(event.at).toLocaleTimeString('zh-CN',{hour12:false});
-  node.textContent=text;
+  setText(node,text);
 }
 function benchmarkRenderKey(data) {
   const activeRun=data.activeRun?Object.fromEntries(Object.entries(data.activeRun).filter(([key])=>key!=='progress')):null;
-  const defaults=data.defaults?{model:data.defaults.model,reasoningEffort:data.defaults.reasoningEffort}:null;
-  return JSON.stringify({...data,activeRun,defaults});
+  return JSON.stringify({...data,activeRun});
+}
+function benchmarkSnapshotShape(data){
+  return !!data&&typeof data==='object'&&typeof data.available==='boolean'&&['activeRun','latestRun','runs'].every(key=>Object.hasOwn(data,key))&&Array.isArray(data.runs)&&data.defaults&&typeof data.defaults==='object';
+}
+function staleBenchmark(reason){
+  state.benchmarkStale=true;state.benchmarkKey=null;
+  catalogNote('基准状态已过期，仍保留最后一次已确认的目录和结果；将在后续轮询中重试。');
+  updateRunControls();setCockpitSupported(false);setPreviewInstance(null);setText($('benchmark-progress'),'');
+  if(reason==='timeout'){setText($('benchmark-state'),'状态已过期');message('基准状态读取超时，当前数据已过期；正在等待后续轮询恢复。',true);}
+  else message(state.submissionUnknown?unknownSubmissionMessage():'基准不可用，请检查本地服务。',true);
+}
+async function fetchBenchmarkSnapshot(timeoutMs=8000){
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{
+    const r=await fetch('/api/benchmark',{cache:'no-store',signal:controller.signal});
+    if(!r.ok)throw Object.assign(new Error('Benchmark read failed'),{httpStatus:r.status});
+    const data=await r.json();if(!benchmarkSnapshotShape(data))throw new Error('Invalid benchmark snapshot');return data;
+  }catch(error){
+    if(error?.name==='AbortError')throw Object.assign(new Error('Benchmark read timed out'),{code:'read_timeout'});
+    throw error;
+  }finally{clearTimeout(timer);}
 }
 async function loadBenchmark() {
-  if(state.polling)return;state.polling=true;
-  try{await capabilities();const r=await fetch('/api/benchmark',{cache:'no-store'});if(!r.ok)throw Error();const data=await r.json();updateProgress(data);const key=benchmarkRenderKey(data);if(key!==state.benchmarkKey){renderBenchmark(data);state.benchmarkKey=key;}}
-  catch{state.benchmarkAvailable=false;$('run').disabled=true;setCockpitSupported(false);setPreviewInstance(null);state.benchmarkKey=null;$('benchmark-progress').textContent='';message('基准不可用，请检查本地服务。',true);}
-  finally{state.polling=false;}
+  if(state.polling){state.benchmarkQueued=true;return;}
+  state.polling=true;state.benchmarkQueued=false;state.reconciling=!!state.submissionUnknown;updateRunControls();
+  const generation=state.benchmarkGeneration,flight=++state.benchmarkFlight,wasReconciling=state.reconciling;
+  try{
+    const [data]=await Promise.all([fetchBenchmarkSnapshot(),capabilities()]);
+    if(generation!==state.benchmarkGeneration)return;
+    syncCatalog(data.defaults);updateProgress(data);
+    if(state.submissionUnknown){
+      reconcileSubmission(data);state.reconciling=false;
+      if(state.submissionUnknown)message(unknownSubmissionMessage(),true);
+    }
+    const key=benchmarkRenderKey(data);
+    if(key!==state.benchmarkKey){renderBenchmark(data);state.benchmarkKey=key;}
+  }catch(error){
+    if(generation===state.benchmarkGeneration)staleBenchmark(error?.code==='read_timeout'?'timeout':'unavailable');
+  }finally{
+    if(generation===state.benchmarkGeneration){if(wasReconciling)state.reconciling=false;if(state.submissionUnknown)message(unknownSubmissionMessage(),true);}
+    if(flight===state.benchmarkFlight){state.polling=false;updateRunControls();}
+  }
 }
-async function runBenchmark(){if($('mode').value==='cockpit'&&!cockpitSupported){message('当前服务不支持 Cockpit 模式',true);return;}if($('mode').value==='html-animated'&&!previewInstance){message('当前服务不支持 HTML 动画预览',true);return;}state.busy=true;$('run').disabled=true;state.requestId='ui_'+crypto.randomUUID().replaceAll('-','');try{await post('/api/benchmark/run',{requestId:state.requestId,model:$('model').value,reasoningEffort:$('effort').value,mode:$('mode').value});await loadBenchmark();}catch(e){message(safeError(e),true);}finally{state.busy=false;$('run').disabled=!state.benchmarkAvailable||['queued','running'].includes(state.displayed?.status);}}
-async function cancelBenchmark(){if(!state.requestId)return;try{await post('/api/benchmark/cancel',{requestId:state.requestId});await loadBenchmark();}catch(e){message(safeError(e),true);}}
+async function runBenchmark(){
+  let pending=state.submissionUnknown;
+  if(pending?.conflict){message(unknownSubmissionMessage(),true);return;}
+  const payload=pending?{...pending.payload}:{model:$('model').value,reasoningEffort:$('effort').value,mode:$('mode').value};
+  const requestId=pending?.requestId??'ui_'+crypto.randomUUID().replaceAll('-','');
+  if(!pending&&(state.busy||state.reconciling||activeBenchmark()||!state.benchmarkAvailable||!state.catalogModelsReady||!state.catalogEffortsReady)){message('请等待当前状态对账和目录恢复后再启动。',true);return;}
+  if(pending&&((!pending.checked&&!state.benchmarkStale)||state.busy||state.reconciling)){message(unknownSubmissionMessage(),true);return;}
+  if(!payload.model||!payload.reasoningEffort){message('模型或推理目录尚未就绪，请恢复目录后再试。',true);return;}
+  if(payload.mode==='cockpit'&&!cockpitSupported){message('当前服务不支持 Cockpit 模式',true);return;}
+  if(payload.mode==='html-animated'&&!previewInstance){message('当前服务不支持 HTML 动画预览',true);return;}
+  state.busy=true;state.reconciling=false;state.requestId=requestId;
+  if(pending&&state.submissionUnknown===pending){state.submissionUnknown={...pending,checked:false};}
+  updateRunControls();
+  const generation=++state.benchmarkGeneration,flight=++state.benchmarkFlight;
+  try{
+    if(pending){
+      message('提交结果未知；正在先用 GET 对账原 requestId，尚未重试。',true);
+      const data=await fetchBenchmarkSnapshot();if(generation!==state.benchmarkGeneration)return;
+      syncCatalog(data.defaults);updateProgress(data);
+      if(reconcileSubmission(data)==='resolved'){renderBenchmark(data);state.benchmarkKey=benchmarkRenderKey(data);return;}
+      if(state.submissionUnknown?.conflict||activeBenchmarkFrom(data)){state.benchmarkKey=null;renderBenchmark(data);state.benchmarkKey=benchmarkRenderKey(data);return;}
+    }
+    message(pending?'GET 暂未找到原请求；正在以相同 requestId 和参数重试。':'正在提交基准运行…');
+    const data=await post('/api/benchmark/run',{requestId,...payload});
+    if(generation!==state.benchmarkGeneration)return;
+    if(!benchmarkSnapshotShape(data)||!submittedRun(data,requestId))throw Object.assign(new Error('Submission response was not confirmed'),{submissionUnknown:true});
+    state.submissionUnknown=null;state.requestId=requestId;state.reconciledRequestId=requestId;
+    syncCatalog(data.defaults);updateProgress(data);renderBenchmark(data);state.benchmarkKey=benchmarkRenderKey(data);
+  }catch(e){
+    if(generation!==state.benchmarkGeneration)return;
+    if(pending){
+      state.submissionUnknown={requestId,payload:{...payload},checked:false,conflict:false};
+      staleBenchmark(e?.code==='read_timeout'?'timeout':'unavailable');
+    }
+    else if(e?.httpStatus||e?.code){message(safeError(e),true);}
+    else{
+      state.submissionUnknown={requestId,payload:{...payload},checked:false,conflict:false};state.reconciling=false;
+      message('提交结果未知；保留原 requestId 和参数，后续先 GET 对账，绝不盲目生成新 ID。',true);
+      loadBenchmark();
+    }
+  }finally{
+    if(generation===state.benchmarkGeneration){state.busy=false;state.reconciling=false;updateRunControls();}
+    if(flight===state.benchmarkFlight){state.polling=false;if(state.benchmarkQueued){state.benchmarkQueued=false;loadBenchmark();}else updateRunControls();}
+  }
+}
+function activeBenchmarkFrom(data){return data?.activeRun&&['queued','running'].includes(data.activeRun.status)?data.activeRun:null;}
+async function cancelBenchmark(){
+  const active=activeBenchmark();if(!active||typeof active.requestId!=='string')return;
+  state.busy=true;updateRunControls();
+  try{await post('/api/benchmark/cancel',{requestId:active.requestId});await loadBenchmark();}
+  catch(e){message(safeError(e),true);}
+  finally{state.busy=false;updateRunControls();}
+}
 async function saveScore(button){const run=state.displayed;if(run?.runId!==button.dataset.run)return;const scores={};for(const select of $('cases').querySelectorAll('select[data-score]'))if(select.dataset.run===run.runId&&select.dataset.case===button.dataset.case)scores[select.dataset.score]=Number(select.value);button.disabled=true;try{await post('/api/benchmark/score',{runId:run.runId,caseId:button.dataset.case,rubricVersion:run.rubricVersion,scores});state.drafts.delete(run.runId+':'+button.dataset.case);state.benchmarkKey=null;await loadBenchmark();message('评分已保存。');}catch(e){message(safeError(e),true);}finally{button.disabled=false;}}
 async function setBaseline(button){try{await post('/api/benchmark/baseline',{runId:button.dataset.run});await loadBenchmark();}catch(e){message(safeError(e),true);}}
 document.addEventListener('change',event=>{const select=event.target;if(select.id==='mode'){updateModeMetadata();$('mode-prompt').textContent=select.value==='cockpit'?cockpitPrompt:select.value==='html-animated'?'鹈鹕骑自行车 · CSS 车轮旋转与轻柔起伏（严格 XML 文档）':select.value==='animated'?'鹈鹕骑自行车 · SVG 动画':'Generate an SVG of a pelican riding a bicycle';return;}if(!select.dataset.score)return;const key=select.dataset.run+':'+select.dataset.case;const scores={...(state.drafts.get(key)??{})};for(const input of $('cases').querySelectorAll('select[data-score]'))if(input.dataset.run===select.dataset.run&&input.dataset.case===select.dataset.case)scores[input.dataset.score]=Number(input.value);state.drafts.set(key,scores);});
@@ -370,8 +572,8 @@ document.addEventListener('click',event=>{const button=event.target.closest('but
 window.addEventListener('pagehide',revokePreviews);
 function setPreviewInstance(instance){
   const changed=previewInstance!==instance;previewInstance=instance;
-  $('html-mode').disabled=!previewInstance;$('html-capability').textContent=previewInstance?'HTML 动画使用受限 HTML/CSS 子集，在独立隔离窗口中预览。':'当前服务不支持 HTML 动画预览';
-  if(changed){state.benchmarkKey=null;revokePreviews();const run=state.displayed;$('cases').replaceChildren(...(run?.caseResults??[]).map(c=>renderCase(run,c)));}
+  $('html-mode').disabled=!previewInstance;setText($('html-capability'),previewInstance?'HTML 动画使用受限 HTML/CSS 子集，在独立隔离窗口中预览。':'当前服务不支持 HTML 动画预览');
+  if(changed){state.benchmarkKey=null;renderCases(state.displayed);}
 }
 function updateModeMetadata(){
   const cockpit=$('mode').value==='cockpit';
@@ -388,4 +590,10 @@ async function capabilities(){
   try{const r=await fetch('/api/capabilities',{cache:'no-store',signal:controller.signal});if(!r.ok)throw Error();const d=await r.json();cockpit=d.product==='codex-companion'&&d.protocolVersion===1&&uuid.test(d.instanceId)&&Array.isArray(d.capabilities)&&[cockpitVersion,'cockpit-preview-source-v1'].every(c=>d.capabilities.includes(c));if(d.product==='codex-companion'&&d.protocolVersion===1&&uuid.test(d.instanceId)&&Array.isArray(d.capabilities)&&[htmlVersion,'isolated-html-preview-v1'].every(c=>d.capabilities.includes(c)))instance=d.instanceId;}catch{}finally{clearTimeout(timer);}
   setCockpitSupported(cockpit);setPreviewInstance(instance);
 }
-wireTaskControls();await telemetry();await loadBenchmark();await getNonce().catch(()=>{});setInterval(telemetry,1000);setInterval(loadBenchmark,1500);
+function liveContract(){
+  for(const id of ['connection','session-state']){const node=$(id);node.setAttribute('role','status');node.setAttribute('aria-live','polite');node.setAttribute('aria-atomic','true');}
+  for(const id of ['cockpit-capability','html-capability'])$(id).removeAttribute('role');
+  $('benchmark-message').setAttribute('role','status');$('benchmark-message').removeAttribute('aria-live');$('benchmark-progress').removeAttribute('role');$('benchmark-progress').removeAttribute('aria-live');
+  for(const section of document.querySelectorAll('main section,main details')){section.removeAttribute('role');section.removeAttribute('aria-live');section.removeAttribute('aria-atomic');}
+}
+liveContract();wireTaskControls();await telemetry();await loadBenchmark();await getNonce().catch(()=>{});setInterval(telemetry,1000);setInterval(loadBenchmark,1500);
