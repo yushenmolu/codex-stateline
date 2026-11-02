@@ -4,7 +4,17 @@ Windows 本机 Codex companion 面板通过 Codex 桌面事件显示当前对话
 
 本版本已于 2026-10-18 经用户确认验收，相关计划与修复记录见[归档索引](docs/archive/README.md)。本地验证日志和截图属于机器特定的诊断数据，不纳入 Git；归档不表示现有旧服务已经加载新版。
 
-## 启动
+## 免安装 EXE 下载
+
+Windows 10/11 **x64** 用户可直接下载 [Codex-Stateline.exe](https://github.com/yushenmolu/codex-stateline/releases/latest/download/Codex-Stateline.exe)，双击启动。只需这一个文件，**不需要下载源码、手动解压、安装 Node.js、执行 npm 命令或管理员权限**。也可在 [Releases](https://github.com/yushenmolu/codex-stateline/releases) 选择历史版本；`SHA256SUMS.txt` 仅用于可选的完整性校验，不是运行依赖。
+
+EXE 内置官方 Node.js 与程序资源，首次运行自动释放到 `%LOCALAPPDATA%\codex-companion\portable\`，后续启动校验并复用。它不是安装程序，不创建开机启动项、不修改 PATH、Codex 配置或登录信息；用量历史仍保留在原来的用户数据目录。窗口右上角“×”是隐藏到托盘，真正退出请使用托盘菜单“退出”；重复双击会唤回已有窗口。更新前先从托盘退出，再换成新版 EXE。
+
+本软件是 Codex 的本机伴侣，**不会附送 Codex 账号、登录凭据或模型服务**：实时状态来自已安装并运行的 Codex，生成基准仍使用本机已有的 Codex CLI、登录/relay 配置，动画预览使用系统 Edge。Windows PowerShell 5.1、.NET Framework/WPF 均使用 Windows 10/11 的系统组件。当前 EXE 尚未购买代码签名证书，Windows 可能显示 SmartScreen 的未知发布者提示；请核对仓库、发布版本及 SHA-256，不要为此关闭系统防护。
+
+打包、真实单文件检查及发布方式见 [免安装打包说明](docs/portable.md)。
+
+## 源码启动
 
 需要 Windows PowerShell 5.1、系统 WPF 和 Node.js 18+；运行基准还需要可用的 `codex.exe` 及其现有登录/relay 配置。项目没有新增依赖，不需要安装浏览器组件。执行 `npm run desktop`，或双击 `Start-Codex-Widget.vbs` / 已创建的桌面快捷方式，打开原生 WPF 悬浮窗。移动项目后需重新运行 `npm run desktop:shortcut` 更新快捷方式。
 

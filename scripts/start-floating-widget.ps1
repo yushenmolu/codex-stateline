@@ -222,7 +222,13 @@ function Show-LauncherDiagnostic([string]$Message) {
   Add-Type -AssemblyName PresentationFramework
   [Windows.MessageBox]::Show($Message, 'Codex native widget', 'OK', 'Warning') | Out-Null
 }
+function Get-LauncherNodePath {
+  $bundled = Join-Path (Split-Path -Parent $PSScriptRoot) 'runtime/node.exe'
+  if (Test-Path -LiteralPath $bundled -PathType Leaf) { return [IO.Path]::GetFullPath($bundled) }
+  return (Get-Command node.exe -ErrorAction Stop).Source
+}
 function Start-NativeLauncher {
+  param([scriptblock]$OpenNativeWindow)
   $projectRoot = Split-Path -Parent $PSScriptRoot
   $nativePath = Join-Path $PSScriptRoot 'native-widget.ps1'
   $owner = $null
@@ -240,7 +246,7 @@ function Start-NativeLauncher {
     $listeners = @(Get-LauncherListeners)
     Write-LauncherLog 'launch' ('listeners=' + $listeners.Count)
     if ($listeners.Count -eq 0) {
-      $node = Get-Command node.exe -ErrorAction Stop
+      $nodePath = Get-LauncherNodePath
       $bytes = New-Object byte[] 32
       $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
       try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
@@ -248,7 +254,7 @@ function Start-NativeLauncher {
       $previous = [Environment]::GetEnvironmentVariable('CODEX_COMPANION_SHUTDOWN_TOKEN', 'Process')
       try {
         [Environment]::SetEnvironmentVariable('CODEX_COMPANION_SHUTDOWN_TOKEN', $token, 'Process')
-        $process = Start-Process -FilePath $node.Source -ArgumentList @('src/server.js') -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru
+        $process = Start-Process -FilePath $nodePath -ArgumentList @('src/server.js') -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru
         $owner = @{ Process = $process; StartTicks = $process.StartTime.ToUniversalTime().Ticks; InstanceId = $null; Token = $token; Revoked = $false }
         # Retain the original OS handle before startup polling or PID reuse.
         $null = $process.Handle
@@ -279,7 +285,7 @@ function Start-NativeLauncher {
     }
     # Same PS5 STA process; UI owns windows only. Shutdown follows main-window close.
     Write-LauncherLog 'launch' 'opening native widget'
-    & $nativePath
+    if ($OpenNativeWindow) { & $OpenNativeWindow } else { & $nativePath }
     Write-LauncherLog 'launch' 'native widget closed'
   } catch {
     Write-LauncherLog 'error' ($_.Exception.GetType().Name + ': ' + $_.Exception.Message)

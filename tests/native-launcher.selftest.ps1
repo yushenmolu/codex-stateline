@@ -209,4 +209,21 @@ $source = Get-Content (Join-Path $root 'scripts/start-floating-widget.ps1') -Raw
 Assert ($source -notmatch '(?i)msedge|user-data-dir|profileDir') 'Browser launcher remains.'
 $package = Get-Content (Join-Path $root 'package.json') -Raw | ConvertFrom-Json
 Assert ($package.scripts.desktop -match '^powershell.exe -STA ') 'Desktop STA missing.'
+& {
+  $script:bundledNodePresent = $true
+  $script:nodePathLookups = 0
+  function Test-Path { param($LiteralPath, $PathType) return $script:bundledNodePresent }
+  function Get-Command {
+    param($Name, $ErrorAction)
+    if ($Name -ne 'node.exe') { throw 'Unexpected runtime lookup.' }
+    $script:nodePathLookups++
+    return [pscustomobject]@{Source='C:\fixture-system\node.exe'}
+  }
+  $bundled = Get-LauncherNodePath
+  Assert ($bundled -ceq (Join-Path $root 'runtime/node.exe')) 'Portable runtime was not selected from the project root.'
+  Assert ($script:nodePathLookups -eq 0) 'Bundled runtime still requires Node on PATH.'
+  $script:bundledNodePresent = $false
+  Assert ((Get-LauncherNodePath) -ceq 'C:\fixture-system\node.exe') 'Source checkout lost system Node fallback.'
+  Assert ($script:nodePathLookups -eq 1) 'Source runtime discovery did not use the normal command lookup.'
+}
 [pscustomobject]@{ status = 'passed'; assertions = $script:passed; powershell = $PSVersionTable.PSVersion.ToString(); serverStarted = $false; modelCalls = 0; historyWrites = 0 } | ConvertTo-Json -Compress
