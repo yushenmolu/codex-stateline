@@ -1,6 +1,16 @@
 [CmdletBinding()]
 param([string]$ExePath)
 $ErrorActionPreference = 'Stop'
+function Write-CiError([string]$Message) {
+    if ($env:GITHUB_ACTIONS -eq 'true') {
+        $escaped = $Message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+        Write-Host ('::error title=Portable EXE verification::' + $escaped)
+    }
+}
+trap {
+    Write-CiError ($_.Exception.Message + "`n" + $_.ScriptStackTrace)
+    throw
+}
 if (-not $ExePath) { $ExePath = Join-Path $PSScriptRoot '../dist/Codex-Stateline.exe' }
 $ExePath = [IO.Path]::GetFullPath($ExePath)
 if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) { throw 'Build the portable EXE before running this check.' }
@@ -32,7 +42,10 @@ function Run-Package([string]$Mode, [string]$Name, [int]$ExpectedExit = 0) {
     try {
         if (-not $process.WaitForExit(120000)) { $process.Kill(); throw ('Packaged runtime timed out: ' + $Name) }
         if ($process.ExitCode -ne $ExpectedExit -and (Test-Path -LiteralPath $report)) {
-            Write-Output (Get-Content -LiteralPath $report -Raw -Encoding UTF8)
+            $content = Get-Content -LiteralPath $report -Raw -Encoding UTF8
+            Write-Output $content
+            $failure = $content | ConvertFrom-Json
+            Write-CiError ('Packaged ' + $Name + ': ' + $failure.Error + "`n" + $failure.Stack)
         }
         Assert ($process.ExitCode -eq $ExpectedExit) ('Unexpected package exit for ' + $Name + ': ' + $process.ExitCode + '; report: ' + $report)
     } finally { $process.Dispose() }

@@ -44,7 +44,7 @@ The package check copies only that EXE into a fresh directory with spaces and no
 
 ## GitHub Release
 
-`.github/workflows/portable-release.yml` runs on a pushed version tag such as `v1.1.0`; its tag must match `package.json`. It builds on Windows, runs the real packaged-runtime check with no system Node on PATH, then creates the GitHub Release and attaches the single EXE plus its checksum. Release permission is scoped to the release job; the checkout action is pinned to a commit and checkout credentials are not persisted. The repository token is supplied only to the publication step.
+`.github/workflows/portable-release.yml` validates pushes to `main` and pushed version tags such as `v1.1.0`. It builds on Windows and runs the real packaged-runtime check with no system Node on PATH. Only a successful tag run can publish, and its tag must match `package.json`: it then creates the GitHub Release and attaches the single EXE plus its checksum. A `main` push never publishes. Test failures also emit escaped GitHub annotations so the failure cause remains visible without access to private job logs. Release permission is scoped to the release job; the checkout action is pinned to a commit and checkout credentials are not persisted. The repository token is supplied only to the publication step.
 
 The permanent latest-download link is:
 
