@@ -2,7 +2,8 @@ Option Explicit
 Dim fileSystem, shell, scriptPath, powershellPath, command
 Set fileSystem = CreateObject("Scripting.FileSystemObject")
 Set shell = CreateObject("WScript.Shell")
-scriptPath = fileSystem.BuildPath(fileSystem.GetParentFolderName(WScript.ScriptFullName), "scripts\open-pelican-animation.ps1")
+' This launcher lives beside the script it starts, so resolve from its own folder.
+scriptPath = fileSystem.BuildPath(fileSystem.GetParentFolderName(WScript.ScriptFullName), "open-pelican-animation.ps1")
 If Not fileSystem.FileExists(scriptPath) Then
     MsgBox "Could not find the animation launcher: " & scriptPath, vbCritical, "Pelican Animation"
     WScript.Quit 1

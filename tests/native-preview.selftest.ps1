@@ -151,13 +151,31 @@ public static class PreviewFixtures {  public static BrowserPreview Production(P
 }
 public sealed class PreviewProcessIdentity {public uint Pid;public long? StartUtcTicks;public string State,ErrorType;}
 public sealed class PreviewProcessObservation {public uint Pid;public long? BeforeStartUtcTicks,AfterStartUtcTicks;public string BeforeState,AfterState,Status,ErrorType;}
+public sealed class PreviewCleanupGraceFixture:IDisposable {
+ readonly BrowserPreview preview;System.Diagnostics.Stopwatch watch;public long GraceMilliseconds=-1;
+ public PreviewCleanupGraceFixture(BrowserPreview p){preview=p;p.LaunchCheckpoint=Check;}
+ void Check(string stage,long generation,uint pid){if(stage=="before_cleanup_member_open"&&watch==null)watch=System.Diagnostics.Stopwatch.StartNew();else if(stage=="before_cleanup_terminate"&&watch!=null&&GraceMilliseconds<0)GraceMilliseconds=watch.ElapsedMilliseconds;}
+ public void Dispose(){preview.LaunchCheckpoint=null;}
+ }
+public sealed class PreviewSwitchRetryFixture:IDisposable {
+ readonly BrowserPreview preview;readonly int holder;public bool Reached;
+ public PreviewSwitchRetryFixture(BrowserPreview p,int holderPid){preview=p;holder=holderPid;p.LaunchCheckpoint=Check;}
+ void Check(string stage,long generation,uint pid){if(stage!="before_switch_exit_retry"||Reached)return;Reached=true;using(var process=System.Diagnostics.Process.GetProcessById(holder)){process.Kill();process.WaitForExit(5000);}}
+ public void Dispose(){preview.LaunchCheckpoint=null;}
+ }
 public sealed class PreviewCleanupExitFixture:IDisposable {
- readonly BrowserPreview preview;readonly CockpitBrowserGuard killer;public bool CheckpointReached,OwnedJobEmpty,RootHandlesSignaled;
+ readonly BrowserPreview preview;readonly CockpitBrowserGuard killer;public bool CheckpointReached,OwnedJobEmpty,RootHandlesSignaled;public int ExitDelayMilliseconds;
  public PreviewCleanupExitFixture(BrowserPreview p){preview=p;killer=p.BindGuard(null,null);p.LaunchCheckpoint=Check;}
- void Check(string stage,long generation,uint pid){if(stage!="before_cleanup_member_open"||CheckpointReached)return;CheckpointReached=true;killer.Revoke();var watch=System.Diagnostics.Stopwatch.StartNew();while(Members().Length>0&&watch.ElapsedMilliseconds<3000)Thread.Sleep(10);OwnedJobEmpty=Members().Length==0;RootHandlesSignaled=true;foreach(IntPtr handle in (System.Collections.Generic.List<IntPtr>)typeof(BrowserPreview).GetField("processHandles",PreviewFixtures.Private).GetValue(preview))RootHandlesSignaled=WaitForSingleObject(handle,1000)==0&&RootHandlesSignaled;if(!OwnedJobEmpty||!RootHandlesSignaled)throw new System.IO.IOException("Fixture owned exit not proven");Thread.Sleep(100);}
+ void Check(string stage,long generation,uint pid){if(stage!="before_cleanup_member_open"||CheckpointReached)return;CheckpointReached=true;killer.Revoke();var watch=System.Diagnostics.Stopwatch.StartNew();while(Members().Length>0&&watch.ElapsedMilliseconds<3000)Thread.Sleep(10);OwnedJobEmpty=Members().Length==0;RootHandlesSignaled=true;foreach(IntPtr handle in (System.Collections.Generic.List<IntPtr>)typeof(BrowserPreview).GetField("processHandles",PreviewFixtures.Private).GetValue(preview))RootHandlesSignaled=WaitForSingleObject(handle,1000)==0&&RootHandlesSignaled;if(!OwnedJobEmpty||!RootHandlesSignaled)throw new System.IO.IOException("Fixture owned exit not proven");Thread.Sleep(100+ExitDelayMilliseconds);}
  uint[] Members(){return (uint[])typeof(BrowserPreview).GetMethod("Members",PreviewFixtures.Private).Invoke(preview,null);}
  public void Dispose(){preview.LaunchCheckpoint=null;killer.Dispose();}
  [System.Runtime.InteropServices.DllImport("kernel32.dll")]static extern uint WaitForSingleObject(IntPtr handle,uint milliseconds);
+}
+public sealed class PreviewTimedFileLock:IDisposable {
+ readonly System.IO.FileStream stream;Task release;
+ public PreviewTimedFileLock(string path){stream=System.IO.File.Open(path,System.IO.FileMode.Open,System.IO.FileAccess.Read,System.IO.FileShare.None);}
+ public void ReleaseAfter(int milliseconds){release=Task.Delay(milliseconds).ContinueWith(delegate(Task completed){stream.Dispose();},TaskScheduler.Default);}
+ public void Dispose(){if(release!=null)release.GetAwaiter().GetResult();stream.Dispose();}
 }
 public sealed class PreviewSecurityWitness {
  readonly CockpitBrowserGuard guard;
@@ -821,7 +839,7 @@ const expression = fs.readFileSync(process.argv[2], 'utf8');
  AssertMemberIdentities $memberIdentities 'old job member survived switch' $c $null
  $dir=Field $c 'directory';$r=Await ($c.StopAsync('fixture'))
  Assert ($r.State -eq 'closed' -and $r.CleanupState -eq 'cleaned' -and -not (Test-Path -LiteralPath $dir)) 'stop cleanup failed'
- $r=Await ($c.SetTargetAsync((Target),[CodexNative.PreviewOpenReason]::FollowSelection));Assert ($r.State -eq 'closed') 'follow reopened without intent'
+ $r=Await ($c.SetTargetAsync((Target),[CodexNative.PreviewOpenReason]::FollowSelection));Assert ($r.State -eq 'closed') 'follow reopened without intent';Assert ($null -ne $r.Target -and $r.Target.RunId -eq '22222222-2222-4222-8222-222222222222') 'follow without intent closed under stale target'
  $r=Await ($c.SetTargetAsync((Target),[CodexNative.PreviewOpenReason]::ExplicitRun));Assert ($r.State -eq 'open') 'explicit run did not reopen'
  $dir=Field $c 'directory';$markerPath=Join-Path $dir 'ownership.txt';$original=[IO.File]::ReadAllText($markerPath);[IO.File]::WriteAllText($markerPath,'forged')
  $r=Await ($c.StopAsync('fixture'));Assert ($r.CleanupState -eq 'retained_path_unsafe' -and (Test-Path -LiteralPath $dir)) 'forged marker deleted'
@@ -832,6 +850,20 @@ const expression = fs.readFileSync(process.argv[2], 'utf8');
  $lock=[IO.File]::Open($locked,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None)
  try{$r=Await ($c.StopAsync('fixture'));Assert ($r.CleanupState -eq 'retained_delete_failed' -and (Test-Path -LiteralPath $dir)) 'locked file cleanup misreported'}finally{$lock.Dispose()}
  $r=Await ($c.StopAsync('fixture'));Assert ($r.CleanupState -eq 'cleaned') 'locked directory recovery failed'
+ # A switch whose old directory cannot be removed must report the failure under the new target; the widget
+ # ignores snapshots for any other target and would otherwise keep showing "loading" until its 90s deadline.
+ $r=Await ($c.SetTargetAsync((Target),[CodexNative.PreviewOpenReason]::ExplicitOpen));$dir=Field $c 'directory'
+ $locked=Join-Path $dir 'profile/locked.txt';[IO.File]::WriteAllText($locked,'fixture')
+ $lock=[IO.File]::Open($locked,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None)
+ $switchTarget=Target '33333333-3333-4333-8333-333333333333'
+ try{$r=Await ($c.SetTargetAsync($switchTarget,[CodexNative.PreviewOpenReason]::ExplicitOpen));Assert ($r.State -eq 'error' -and $r.ErrorCode -eq 'cleanup_failed' -and $null -ne $r.Target -and $r.Target.RunId -eq $switchTarget.RunId) ('switch cleanup failure published under stale target: '+$r.State+' / '+$r.ErrorCode+' / '+$(if($r.Target){$r.Target.RunId}else{'null'}))}finally{$lock.Dispose()}
+ $r=Await ($c.SetTargetAsync($switchTarget,[CodexNative.PreviewOpenReason]::ExplicitOpen));Assert ($r.State -eq 'open' -and -not (Test-Path -LiteralPath $dir)) ('switch did not recover after release: '+$r.State+' / '+$r.ErrorCode+' / '+$r.CleanupState)
+ # When only the final directory delete fails, this instance has already removed its own marker. That missing
+ # marker must not turn the directory "unsafe" forever; a recreated marker is still refused.
+ $dir=Field $c 'directory';$markerPath=Join-Path $dir 'ownership.txt'
+ [IO.File]::Delete($markerPath);$c.GetType().GetField('markerRemoved',[Reflection.BindingFlags]'Instance,NonPublic').SetValue($c,$true)
+ [IO.File]::WriteAllText($markerPath,'forged');$r=Await ($c.StopAsync('fixture'));Assert ($r.CleanupState -eq 'retained_path_unsafe' -and (Test-Path -LiteralPath $dir)) 'recreated marker accepted after own removal'
+ [IO.File]::Delete($markerPath);$r=Await ($c.StopAsync('fixture'));Assert ($r.CleanupState -eq 'cleaned' -and -not (Test-Path -LiteralPath $dir)) ('own removed marker blocked cleanup: '+$r.CleanupState)
  # Reparse points are retained without traversing the target.
  $null=Await ($c.SetTargetAsync((Target),[CodexNative.PreviewOpenReason]::ExplicitOpen));$dir=Field $c 'directory'
  $junction=Join-Path $dir 'profile/redirect';New-Item -ItemType Junction -Path $junction -Target $fixtureRoot|Out-Null
@@ -860,6 +892,13 @@ const expression = fs.readFileSync(process.argv[2], 'utf8');
  $r=Await ($cleanupRace.SetTargetAsync((Target),[CodexNative.PreviewOpenReason]::ExplicitOpen));Assert ($r.State -eq 'open') 'confirmed member exit blocked same-instance explicit reopen'
  $watch.Restart();do{$cleanupReopenMembers=@(Members $cleanupRace);if($cleanupReopenMembers.Count -ge 2){break};Start-Sleep -Milliseconds 25}while($watch.ElapsedMilliseconds -lt 10000)
  Assert ($cleanupReopenMembers.Count -ge 2) 'cleanup reopen descendant readiness timeout'
+ # A proven exit that consumed the whole exit-wait budget (slow Edge teardown under load) must still delete the
+ # profile; a shared budget used to report it as cleanup_failed and block the next preview switch.
+ $slowExitDirectory=Field $cleanupRace 'directory';$slowExitFixture=New-Object CodexNative.PreviewCleanupExitFixture $cleanupRace;$slowExitFixture.ExitDelayMilliseconds=5200
+ try{$r=Await ($cleanupRace.StopAsync('cleanup-slow-proven-exit')) 'cleanup-slow-proven-exit';Assert ($slowExitFixture.CheckpointReached -and $slowExitFixture.OwnedJobEmpty -and $slowExitFixture.RootHandlesSignaled) 'slow exit fixture did not prove owned exit';Assert ($r.State -eq 'closed' -and $r.CleanupState -eq 'cleaned' -and -not (Test-Path -LiteralPath $slowExitDirectory) -and -not (Field $cleanupRace 'exitUnconfirmed')) ('late proven exit starved profile deletion: '+$r.State+'/'+$r.CleanupState)}finally{$slowExitFixture.Dispose()}
+ $r=Await ($cleanupRace.SetTargetAsync((Target),[CodexNative.PreviewOpenReason]::ExplicitOpen)) 'cleanup-slow-exit-reopen';Assert ($r.State -eq 'open') 'reopen after slow proven exit failed'
+ $watch.Restart();do{$cleanupReopenMembers=@(Members $cleanupRace);if($cleanupReopenMembers.Count -ge 2){break};Start-Sleep -Milliseconds 25}while($watch.ElapsedMilliseconds -lt 10000)
+ Assert ($cleanupReopenMembers.Count -ge 2) 'slow exit reopen descendant readiness timeout'
  # An exit that cannot be proven keeps the Job and profile, then a later operation proves the exit and recovers
  # without a widget restart. The pinned process lives outside the Job, so only the fixture can end it.
  $unconfirmedDirectory=Field $cleanupRace 'directory';$unconfirmedHolder=Start-Process -FilePath $cleanupRaceExecutable -ArgumentList 'child' -WindowStyle Hidden -PassThru
@@ -872,7 +911,19 @@ const expression = fs.readFileSync(process.argv[2], 'utf8');
  }finally{$unconfirmedHolder.Kill();$unconfirmedHolder.WaitForExit(5000)|Out-Null;$unconfirmedHolder.Dispose()}
  $r=Await ($cleanupRace.SetTargetAsync((Target),[CodexNative.PreviewOpenReason]::ExplicitOpen)) 'cleanup-unconfirmed-recovered'
  Assert ($r.State -eq 'open' -and -not (Field $cleanupRace 'exitUnconfirmed') -and (Field $cleanupRace 'retainedJob') -eq [IntPtr]::Zero -and -not (Test-Path -LiteralPath $unconfirmedDirectory)) ('proven retained exit did not recover without restart: state='+$r.State+'; cleanup='+$r.CleanupState+'; diagnostic='+$cleanupRace.CleanupDiagnostic)
- $r=Await ($cleanupRace.StopAsync('cleanup-member-reopen-finally'));Assert ($r.CleanupState -eq 'cleaned') 'ready reopened Job failed cleanup'
+ # A slow teardown that outlasts the first exit wait is proven once more before a switch reports cleanup_failed,
+ # so the user does not have to press reload again. The pinned holder lives outside the Job until the retry.
+ $retryDirectory=Field $cleanupRace 'directory';$retryHolder=Start-Process -FilePath $cleanupRaceExecutable -ArgumentList 'child' -WindowStyle Hidden -PassThru;$retryFixture=$null
+ try{
+  Assert ([CodexNative.PreviewFixtures]::PinUnconfirmedHandle($cleanupRace,$retryHolder.Id)) 'switch retry fixture could not pin its holder'
+  $retryFixture=[CodexNative.PreviewSwitchRetryFixture]::new($cleanupRace,$retryHolder.Id)
+  $r=Await ($cleanupRace.SetTargetAsync((Target '33333333-3333-4333-8333-333333333333'),[CodexNative.PreviewOpenReason]::ExplicitOpen)) 'cleanup-switch-exit-retry'
+  Assert ($retryFixture.Reached -and $r.State -eq 'open' -and $r.Target.RunId -eq '33333333-3333-4333-8333-333333333333' -and -not (Field $cleanupRace 'exitUnconfirmed') -and -not (Test-Path -LiteralPath $retryDirectory)) ('switch did not re-prove a late exit: '+$r.State+'/'+$r.CleanupState)
+ }finally{if($retryFixture){$retryFixture.Dispose()};if(-not $retryHolder.HasExited){$retryHolder.Kill()};$retryHolder.WaitForExit(5000)|Out-Null;$retryHolder.Dispose()}
+ # Cleanup keeps its 1s pause before TerminateJobObject even without a window to accept WM_CLOSE: terminating
+ # headless Edge at once did not shorten stops and left the slowest child exiting later.
+ $graceFixture=New-Object CodexNative.PreviewCleanupGraceFixture $cleanupRace
+ try{$r=Await ($cleanupRace.StopAsync('cleanup-member-reopen-finally'));Assert ($r.CleanupState -eq 'cleaned') 'ready reopened Job failed cleanup';Assert ($graceFixture.GraceMilliseconds -ge 800) ('cleanup skipped its pause before TerminateJobObject: '+$graceFixture.GraceMilliseconds+'ms')}finally{$graceFixture.Dispose()}
  # Natural exit suppresses follow; a new explicit operation may reopen.
  $short=[CodexNative.PreviewFixtures]::Create((New-Object CodexNative.PreviewFixtureHandler),$exe,'-NoProfile -NonInteractive -WindowStyle Hidden -Command "Start-Sleep -Milliseconds 300"');$controllers.Add($short)
  $null=Await ($short.SetTargetAsync((Target),[CodexNative.PreviewOpenReason]::ExplicitOpen))
@@ -884,6 +935,23 @@ const expression = fs.readFileSync(process.argv[2], 'utf8');
  $dispose=[CodexNative.PreviewFixtures]::Create((New-Object CodexNative.PreviewFixtureHandler),$exe,$args);$controllers.Add($dispose)
  $null=Await ($dispose.SetTargetAsync((Target),[CodexNative.PreviewOpenReason]::ExplicitOpen));$disposeDir=Field $dispose 'directory';$dispose.Dispose()
  Assert (-not (Test-Path -LiteralPath $disposeDir)) 'dispose left owned profile'
+ # Dispose can overlap a slow Stop: its first delete budget expires, then the loop's stop branch retries.
+ # Keep an owned file locked for 13s so neither the old 6s wait nor a 12s wait can report completion early.
+ $slowDispose=[CodexNative.PreviewFixtures]::Create((New-Object CodexNative.PreviewFixtureHandler),$cleanupRaceExecutable,'');$controllers.Add($slowDispose)
+ $null=Await ($slowDispose.SetTargetAsync((Target),[CodexNative.PreviewOpenReason]::ExplicitOpen));$slowDisposeDir=Field $slowDispose 'directory'
+ $watch.Restart();do{$disposeMembers=@(Members $slowDispose);if($disposeMembers.Count -ge 2){break};Start-Sleep -Milliseconds 25}while($watch.ElapsedMilliseconds -lt 10000)
+ Assert ($disposeMembers.Count -ge 2) 'slow dispose descendant readiness timeout'
+ $disposeLockedFile=Join-Path $slowDisposeDir 'profile/locked.txt';[IO.File]::WriteAllText($disposeLockedFile,'fixture')
+ $disposeLock=[CodexNative.PreviewTimedFileLock]::new($disposeLockedFile);$disposeExitFixture=New-Object CodexNative.PreviewCleanupExitFixture $slowDispose;$disposeExitFixture.ExitDelayMilliseconds=4400
+ try{
+  $stopping=$slowDispose.StopAsync('dispose-during-slow-cleanup')
+  $watch.Restart();while(-not $disposeExitFixture.CheckpointReached -and $watch.ElapsedMilliseconds -lt 5000){Start-Sleep -Milliseconds 10}
+  Assert ($disposeExitFixture.CheckpointReached) 'slow dispose did not overlap cleanup'
+  $disposeLock.ReleaseAfter(13000);$slowDispose.Dispose()
+  Assert ($disposeExitFixture.OwnedJobEmpty -and $disposeExitFixture.RootHandlesSignaled) 'slow dispose fixture did not prove owned exit'
+  Assert ($stopping.IsCompleted -and (Field $slowDispose 'worker').IsCompleted) 'dispose returned before both cleanup budgets finished'
+  Assert (-not (Test-Path -LiteralPath $slowDisposeDir)) 'slow dispose left owned profile after a temporary lock'
+ }finally{$disposeLock.Dispose();$null=(Field $slowDispose 'worker').Wait(20000);$disposeExitFixture.Dispose();$slowDispose.Dispose()}
  $tree.Dispose()
  $c.Dispose()
 } catch {

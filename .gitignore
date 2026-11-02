@@ -14,6 +14,7 @@
 !/output/pelican-362f3c3d-animated.svg
 
 # Runtime data, credentials and build artifacts
+/runtime/
 node_modules/
 coverage/
 dist/

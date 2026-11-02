@@ -6,6 +6,7 @@
 > 下文出现旧路径时以本说明为准：
 >
 > - 测量脚本 `output/*.mjs`、`output/*.ps1` → **`docs/reports/tools/`**
+> - 三个 IPC 探针（`probe-codex-ipc.mjs`、`probe-codex-threads.mjs`、`probe-effort-frames.mjs`）→ **`docs/reports/tools/`**
 > - 测量日志（`output/speed-*.log`、`output/pelican-*.log`）与调试截图 → **已删除**（关键数据已摘录入本文表格）
 > - 正文中的 `output/...` 一律指整理前的旧位置
 >

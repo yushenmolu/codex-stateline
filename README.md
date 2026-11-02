@@ -94,11 +94,15 @@ src/            服务端与 Web 前端
   public/          Web 面板（index.html / app.js / styles.css / tokens.css）
 scripts/        启动器、原生悬浮窗、图标与快捷方式安装
   native/          WPF 悬浮窗源码（WidgetClient.cs 等），由 native-widget.ps1 编译
+  open-pelican-animation.vbs  旧动画预览的启动壳，启动同目录的 open-pelican-animation.ps1
 tests/          后端测试与两项原生 selftest
+  fixtures/rollout-archive/   压缩会话归档样本（未纳入 Git，见下）
 assets/         快捷方式图标源文件
 docs/           设计与历史文档，见下
 output/         生成物目录，除交付用的一个 SVG 外全部被 Git 忽略
 ```
+
+根目录只保留 `Start-Codex-Widget.vbs` 一个双击入口：桌面快捷方式和 `scripts/install-widget-shortcuts.ps1` 都以它为目标，移动它会打断已创建的 `.lnk`。旧动画预览的启动壳 `open-pelican-animation.vbs` 已移入 `scripts/`，与它启动的 `.ps1` 同目录，按 `WScript.ScriptFullName` 的父目录解析目标。
 
 文档索引：
 
@@ -108,8 +112,13 @@ output/         生成物目录，除交付用的一个 SVG 外全部被 Git 忽
 | [数据显示与鹈鹕稳定性计划](docs/archive/2026-10-30-widget-stability-plan.md) | 2026-10-30 修复归档、验收结果与未验证范围 |
 | [docs/ui-redesign/](docs/ui-redesign/) | 界面重设计的令牌体系、Live 卡片设计规格与实施记录 |
 | [docs/reports/2026-10-22-pelican-speed-report.md](docs/reports/2026-10-22-pelican-speed-report.md) | 鹈鹕基准的生图耗时实测与归因 |
+| [docs/README.md](docs/README.md) | 文档索引与仓库整理记录（移动/删除清单及理由） |
 
 两份文档目录下的 `tools/` 子目录收纳了当时的测量与分析脚本。它们是历史记录的配套资产，不在 `npm` 脚本链路上：`docs/reports/tools/` 需手动设置中转地址等环境变量才能运行，`docs/ui-redesign/tools/token-lint-legacy.mjs` 是旧版设计的令牌闸门，其阈值针对已被替换的旧样式，**对当前令牌体系不再适用**。`docs/ui-redesign/WidgetTheme.cs` 是与 `src/public/tokens.css` 取值一致的原生令牌常量文件，尚未接入 `scripts/native-widget.ps1` 的编译列表，采用前需手动追加。
+
+`docs/reports/tools/` 另外收纳三个只读 IPC 探针：`probe-codex-ipc.mjs` 跟踪单条对话的 `latestTokenUsageInfo` 原始字段，`probe-codex-threads.mjs` 枚举 app-server 愿意流出的全部对话，`probe-effort-frames.mjs` 打印每帧的 `latestModel` / `latestReasoningEffort`。它们只发握手与跟随消息，不改状态，是实时卡片字段血缘的证据脚本，同样不在 `npm` 链路上。
+
+`tests/fixtures/rollout-archive/` 保存一份真实会话的压缩归档样本（`archived-rollout-2026-07-22-sample.jsonl.zst`），用于复核压缩帧读取路径。它含真实对话内容，因此按 `.gitignore` 的 `*.jsonl.zst` 规则**保持未纳入 Git**：源码检出不含该样本，测试也不依赖它存在。
 
 ## 验证
 
