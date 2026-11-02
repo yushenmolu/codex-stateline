@@ -517,6 +517,21 @@ test('rejects invalid host and disallowed method', async (t) => {
   assert.equal(method.headers.get('allow'), 'POST');
 });
 
+test('native static reads require the existing same-origin client contract', async (t) => {
+  const base = await startApp(t);
+  for (const path of ['/', '/app.js', '/tokens.css']) {
+    const missing = await request(base, path);
+    assert.equal(missing.status, 403);
+    assert.equal((await missing.json()).error.code, 'fetch_metadata_invalid');
+    const foreign = await request(base, path, { headers: { Origin: 'https://attacker.invalid' } });
+    assert.equal(foreign.status, 403);
+    assert.equal((await foreign.json()).error.code, 'origin_invalid');
+    const native = await request(base, path, { headers: { Origin: ORIGIN } });
+    assert.equal(native.status, 200);
+    assert.ok((await native.text()).length > 0);
+  }
+});
+
 test('browser nonce bootstrap accepts the Fetch empty destination and preserves origin boundaries', async (t) => {
   const calls = [];
   const base = await startApp(t, { benchmark: {

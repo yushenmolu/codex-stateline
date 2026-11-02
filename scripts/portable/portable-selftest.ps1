@@ -32,6 +32,7 @@ try {
         foreach ($path in @('/', '/app.js', '/tokens.css')) {
             $request = [Net.HttpWebRequest]::Create('http://127.0.0.1:4173' + $path)
             $request.Proxy = $null; $request.AllowAutoRedirect = $false; $request.Timeout = 5000
+            $request.Headers['Origin'] = $script:CompanionOrigin
             $response = $request.GetResponse()
             try { if ([int]$response.StatusCode -ne 200 -or $response.ContentLength -eq 0) { throw ('Missing packaged web asset: ' + $path) } } finally { $response.Dispose(); $request.Abort() }
         }
